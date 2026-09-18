@@ -757,16 +757,11 @@ runs:
         echo "::endgroup::"
 
     - name: Fetch SusFS and Other Dependencies
-        run: |
-         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-         cd susfs4ksu
-         git checkout 5727f79e3a7175cfb0e1a754fc2ed78eaf866237
-
-         shell: bash
-         run: |
-         echo "::group::Fetch dependencies"
-         set -euo pipefail
-         echo "Fetching SusFS and other dependencies..."
+      shell: bash
+      run: |
+        echo "::group::Fetch dependencies"
+        set -euo pipefail
+        echo "Fetching SusFS and other dependencies..."
         
         
         if [ "${{ env.OP_SUSFS }}" = true ]; then
@@ -814,7 +809,7 @@ runs:
           fi
           
           local aria2_headers=(
-            "--header=User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "--header=User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0"
             "--header=Accept: */*"
             "--header=Connection: keep-alive"
           )
