@@ -1342,15 +1342,61 @@ runs:
             patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch"
         fi
 
-    - name: Add Tmpfs Support
+    - name: Add OverlayFS / Mountify Support
       shell: bash
       run: |
         set -euo pipefail
-        echo "Add Tmpfs Support"
-        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        echo "::group::Add OverlayFS / Mountify support"
+        DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+
+        # Mountify requires OverlayFS in-kernel and strongly benefits from
+        # tmpfs xattrs.  The failure log showed OverlayFS itself is present,
+        # but this makes the required kernel configuration explicit for the
+        # rebuilt OP13R 6.1 kernel instead of relying on the vendor defconfig.
+        cat >> "$DEFCONFIG" <<'EOF'
+        CONFIG_OVERLAY_FS=y
+        CONFIG_OVERLAY_FS_INDEX=y
+        CONFIG_OVERLAY_FS_XINO_AUTO=y
+        CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+        CONFIG_EXPORTFS=y
         CONFIG_TMPFS_XATTR=y
         CONFIG_TMPFS_POSIX_ACL=y
         EOF
+
+        echo "OverlayFS/Mountify config requested:"
+        grep -E '^(CONFIG_OVERLAY_FS|CONFIG_EXPORTFS|CONFIG_TMPFS_(XATTR|POSIX_ACL))=' "$DEFCONFIG" | tail -n 20 || true
+        echo "::endgroup::"
+
+    - name: Verify OverlayFS source compatibility
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Verify OverlayFS source compatibility"
+        OVL_UTIL="$COMMON_KERNEL_FOLDER/fs/overlayfs/util.c"
+        OVL_PARAMS="$COMMON_KERNEL_FOLDER/fs/overlayfs/params.c"
+
+        [ -f "$OVL_UTIL" ] || { echo "::error::Missing OverlayFS source: $OVL_UTIL"; exit 1; }
+        [ -f "$OVL_PARAMS" ] || { echo "::error::Missing OverlayFS source: $OVL_PARAMS"; exit 1; }
+
+        echo "Kernel OverlayFS rejection logic:"
+        grep -n -A18 -B4 'ovl_dentry_weird' "$OVL_UTIL" | head -n 80 || true
+        echo
+        echo "OverlayFS mount checks:"
+        grep -n -E 'ovl_dentry_weird|sb_has_encoding|DCACHE_OP_HASH|DCACHE_OP_COMPARE' "$OVL_PARAMS" "$OVL_UTIL" || true
+
+        # The supplied device log reports:
+        #   overlayfs: filesystem on '/data/adb/modules/.../.payload/odm/etc/camera/config' not supported
+        # That message is emitted by OverlayFS when the lowerdir dentry is
+        # rejected by ovl_dentry_weird().  Do not silently weaken that kernel
+        # security/filesystem invariant here: if this source tree still has
+        # the casefold/unsupported-dentry restriction, leave it visible in
+        # the build log so the correct Mountify-side workaround (ext4-sparse
+        # backing for F2FS/casefold /data) can be selected.
+        if grep -q 'ovl_dentry_weird' "$OVL_UTIL"; then
+          echo "⚠️ OverlayFS still has ovl_dentry_weird() lowerdir filtering."
+          echo "   This is expected on older 6.1 trees and is distinct from CONFIG_OVERLAY_FS."
+        fi
+        echo "::endgroup::"
 
     - name: Add BBR
       if: ${{ env.OP_BBR == 'true' }}
