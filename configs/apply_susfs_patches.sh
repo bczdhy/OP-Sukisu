@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 _op13r_root="${_op13r_root:-}"
 _bridge_list="${_bridge_list:-}"
 echo "::group::Apply SUSFS patches"
