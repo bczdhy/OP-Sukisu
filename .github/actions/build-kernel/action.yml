@@ -790,62 +790,39 @@ runs:
           fi
         fi
         
-        retry_fetch_archive() {
+        # Fetch a GitHub/GitLab repository reliably. SUSFS is fetched with Git
+        # rather than a generated archive because GitLab archive downloads can
+        # return HTTP 403/5xx in CI and archive filenames are not stable for
+        # full commit hashes. Supports branches, tags, and 40-character commits.
+        retry_fetch_git() {
           local url="$1"
-          local branch="${2:-main}"
+          local ref="${2:-main}"
+          local dir="$3"
           local max_attempts=3
           local attempt=1
-          
-          local repo_name=$(basename "$url" .git)
-          local safe_branch=$(echo "$branch" | tr '/' '_')
-          local archive_name="${repo_name}_${safe_branch}.tar.gz"
-          local shm_path="/dev/shm/$archive_name"
-          
-          local nproc=$(nproc 2>/dev/null || echo 4)
-          
-          local aria_log_flags="--quiet --summary-interval=0"
-          if [ "${{ inputs.debug }}" = "true" ]; then
-              aria_log_flags="--summary-interval=5"
-          fi
-          
-          local aria2_headers=(
-            "--header=User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:158.0) Gecko/20100101 Firefox/158.0"
-            "--header=Accept: */*"
-            "--header=Connection: keep-alive"
-          )
-          
-          local download_url=""
-          if [[ "$url" == *"github.com"* ]]; then
-              download_url="${url%.git}/archive/refs/heads/${branch}.tar.gz"
-          elif [[ "$url" == *"gitlab.com"* ]]; then
-              download_url="${url%.git}/-/archive/${branch}/${repo_name}-${branch}.tar.gz"
-          else
-              echo "::error::Unsupported host: $url"
-              return 1
-          fi
-          
-          while [ $attempt -le $max_attempts ]; do
-              echo " Attempt $attempt/$max_attempts: High-speed fetch for $repo_name ($branch)"
-              
-              if aria2c -x16 -s16 -j16 -k1M --retry-wait=2 --max-tries=5 -d "/dev/shm" -o "$archive_name" --allow-overwrite=true "${aria2_headers[@]}" $aria_log_flags "$download_url"; then
-                  mkdir -p "$repo_name"
-                  if tar -I "pigz -p $nproc -b 256" -x --record-size=1M -f "$shm_path" -C "$repo_name" --strip-components=1 --no-same-owner; then
-                      echo "✅ Success: $repo_name synced"
-                      rm -f "$shm_path"
-                      return 0
-                  fi
+
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "🔄 Attempt $attempt/$max_attempts: fetching $url ($ref)"
+            rm -rf "$dir"
+
+            if git clone --filter=blob:none --no-checkout "$url" "$dir"; then
+              if git -C "$dir" fetch --depth=1 origin "$ref" && \
+                 git -C "$dir" checkout --detach FETCH_HEAD; then
+                echo "✅ Successfully fetched $dir at $(git -C "$dir" rev-parse HEAD)"
+                return 0
               fi
-              
-              echo "⚠️ Attempt $attempt failed, clearing RAM and retrying..."
-              rm -rf "$repo_name" "$shm_path" 2>/dev/null
-              sleep 5
-              attempt=$((attempt + 1))
+            fi
+
+            echo "⚠️ Fetch failed; retrying in $((attempt * 5)) seconds..."
+            rm -rf "$dir"
+            sleep $((attempt * 5))
+            attempt=$((attempt + 1))
           done
-          
-          echo "::error::All attempts failed for $url"
+
+          echo "::error::Unable to fetch $url at ref $ref after $max_attempts attempts"
           return 1
         }
-        
+
         retry_clone() {
           local url="$1"
           local branch="${2:-main}"
@@ -891,36 +868,22 @@ runs:
         
         if [ "${{ env.OP_SUSFS }}" = true ]; then
           echo "Using SUSFS branch/commit: $SUSFS_BRANCH"
-          SUSFS_URL="https://gitlab.com/simonpunk/susfs4ksu.git"
+          if ! retry_fetch_git \
+              "https://gitlab.com/simonpunk/susfs4ksu.git" \
+              "$SUSFS_BRANCH" \
+              "$GITHUB_WORKSPACE/susfs4ksu"; then
+            echo "::error::Failed to fetch SUSFS from GitLab"
+            exit 1
+          fi
 
-       rm -rf susfs4ksu
-
-       if [[ "$SUSFS_BRANCH" =~ ^[0-9a-fA-F]{40}$ ]]; then
-       echo "📌 SUSFS commit detected: $SUSFS_BRANCH"
-
-       git clone --filter=blob:none --no-checkout \
-        "$SUSFS_URL" susfs4ksu
-
-       cd susfs4ksu
-       git fetch --depth=1 origin "$SUSFS_BRANCH"
-       git checkout --detach "$SUSFS_BRANCH"
-       cd ..
-
-       else
-    echo "🌿 SUSFS branch detected: $SUSFS_BRANCH"
-
-    git clone --depth=1 \
-        --branch "$SUSFS_BRANCH" \
-        "$SUSFS_URL" susfs4ksu
-       fi
-
-    echo "✅ SUSFS fetched successfully"
-
-    cd susfs4ksu
-echo "SUSFS actual commit: $(git rev-parse HEAD)"
-echo "SUSFS version: $(grep '#define SUSFS_VERSION' kernel_patches/include/linux/susfs.h || true)"
-      cd ..
-          echo "SUSFS_COMMIT_SHA=$SUSFS_BRANCH" >> $GITHUB_ENV
+          SUSFS_ACTUAL_SHA="$(git -C "$GITHUB_WORKSPACE/susfs4ksu" rev-parse HEAD)"
+          echo "SUSFS_COMMIT_SHA=$SUSFS_ACTUAL_SHA" >> "$GITHUB_ENV"
+          echo "SUSFS requested ref: $SUSFS_BRANCH"
+          echo "SUSFS resolved commit: $SUSFS_ACTUAL_SHA"
+          if [ ! -f "$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h" ]; then
+            echo "::error::Fetched SUSFS tree is missing kernel_patches/include/linux/susfs.h"
+            exit 1
+          fi
         fi
 
         echo "✅ Dependencies cloned"
