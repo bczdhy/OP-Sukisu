@@ -1090,13 +1090,11 @@ runs:
         PY
 
           # OP13r / SukiSU compatibility:
-          # The downloaded helper still contains an older syscall-event bridge
-          # contract which expects ksu_handle_stat_sucompat().  This 6.1 tree
-          # exposes the current filename-based ksu_handle_stat() handler instead.
-          #
-          # IMPORTANT: this must be fixed INSIDE the helper before it runs.
-          # A post-helper replacement is too late because the helper performs
-          # its final safety sweep before returning.
+          # Do NOT globally rename ksu_handle_stat_sucompat -> ksu_handle_stat.
+          # Linux 6.1 has two different stat-hook signatures:
+          #   VFS hook:    ksu_handle_stat(int *, struct filename **, int *)
+          #   bridge hook: ksu_handle_stat_user(int *, const char __user **, int *)
+          # The syscall-event bridge must use the second form.
           python3 - "$SCRIPT" <<'PY'
         import sys
         from pathlib import Path
@@ -1104,28 +1102,64 @@ runs:
         p = Path(sys.argv[1])
         s = p.read_text()
 
-        old = "ksu_handle_stat_sucompat"
-        new = "ksu_handle_stat"
+        marker = 'Running final SukiSU targeted safety sweep...'
+        inject = r"""
+        # OP13r/Linux 6.1 stat-hook compatibility.
+        for _bridge in \
+          "$KSU_KERNEL/hook/syscall_event_bridge.c" \
+          "$KSU_KERNEL/kernel/hook/syscall_event_bridge.c" \
+          "$KSU_KERNEL/drivers/kernelsu/hook/syscall_event_bridge.c"; do
+          if [ -f "$_bridge" ]; then
+            sed -i 's/ksu_handle_stat(dfd, filename_user, flags);/ksu_handle_stat_user(dfd, filename_user, flags);/g' "$_bridge"
+            sed -i 's/ksu_handle_stat_sucompat(dfd, filename_user, flags);/ksu_handle_stat_user(dfd, filename_user, flags);/g' "$_bridge"
+            echo "[OP13r] normalized stat bridge: $_bridge"
+          fi
+        done
 
-        count = s.count(old)
-        if count:
-            s = s.replace(old, new)
-            p.write_text(s)
-            print(f"Rewrote {count} helper reference(s): {old} -> {new}")
-        else:
-            print(f"No {old} references found in helper; leaving helper unchanged")
+        for _sucompat in \
+          "$KSU_KERNEL/feature/sucompat.c" \
+          "$KSU_KERNEL/kernel/feature/sucompat.c" \
+          "$KSU_KERNEL/drivers/kernelsu/feature/sucompat.c"; do
+          if [ -f "$_sucompat" ] && ! grep -q 'ksu_handle_stat_user' "$_sucompat"; then
+            cat >> "$_sucompat" <<'OP13R_STAT_USER_EOF'
+
+        /* OP13r/Linux 6.1: userspace stat compatibility handler. */
+        int ksu_handle_stat_user(int *dfd, const char __user **filename_user, int *flags)
+        {
+            if (unlikely(!filename_user))
+                return 0;
+
+            char path[sizeof(su_path) + 1] = {0};
+            if (strncpy_from_user(path, *filename_user, sizeof(path) - 1) < 0)
+                return 0;
+
+            if (unlikely(!memcmp(path, su_path, sizeof(su_path)))) {
+                pr_info("ksu_handle_stat_user: su->sh!\\n");
+                *filename_user = sh_user_path();
+            }
+            return 0;
+        }
+        OP13R_STAT_USER_EOF
+            echo "[OP13r] injected ksu_handle_stat_user: $_sucompat"
+          fi
+        done
+        """
+        if marker in s and 'OP13r/Linux 6.1 stat-hook compatibility.' not in s:
+            s = s.replace(marker, inject + '\n' + marker, 1)
+
+        s = s.replace(
+            'ksu_handle_stat(dfd, filename_user, flags);',
+            'ksu_handle_stat_user(dfd, filename_user, flags);'
+        )
+        s = s.replace(
+            'ksu_handle_stat_sucompat(dfd, filename_user, flags);',
+            'ksu_handle_stat_user(dfd, filename_user, flags);'
+        )
+        p.write_text(s)
+        print("Prepared SukiSU helper for ksu_handle_stat_user")
         PY
 
-          # The helper itself must now contain the current stat symbol before
-          # execution. This catches a future upstream helper change early.
-          if grep -q 'ksu_handle_stat_sucompat' "$SCRIPT"; then
-            echo "::error::SukiSU helper still contains obsolete ksu_handle_stat_sucompat references"
-            grep -n 'ksu_handle_stat_sucompat' "$SCRIPT" | head -n 20 || true
-            exit 1
-          fi
-
-          echo "✅ SukiSU syscall-event bridge compatibility prepared before SUSFS helper execution"
-        fi
+          echo "✅ SukiSU syscall-event bridge stat compatibility prepared before SUSFS helper execution"
 
         bash "$SCRIPT"
 
