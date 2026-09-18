@@ -1041,7 +1041,6 @@ runs:
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
         _op13r_root: ""
         _bridge_list: ""
-        
       run: |
         set -euo pipefail
         # Full SukiSU-side SUSFS integration via configs/apply_susfs_patches.sh:
@@ -1053,20 +1052,7 @@ runs:
         # NEED_HOOKS=false in GITHUB_ENV.
         SCRIPT="$GITHUB_WORKSPACE/configs/apply_susfs_patches.sh"
         [ -f "$SCRIPT" ] || { echo "::error::SUSFS apply script not found: $SCRIPT"; exit 1; }
-        chmod +x "$SCRIPT"
-        
-      run: |
-        set -euo pipefail
-        # Full SukiSU-side SUSFS integration via configs/apply_susfs_patches.sh:
-        # applies the KernelSU-side 10_enable_susfs_for_ksu patch + fix_sukisu_*
-        # reconciliation AND the kernel-side 50_add_susfs patch + defconfig. This
-        # replaces the previous inline apply, which only handled the kernel-side
-        # patch (fine for a susfs-native manager, insufficient for the SukiSU Ultra
-        # manager, which needs manager-side wiring). The script sets SUSVER and
-        # NEED_HOOKS=false in GITHUB_ENV.
-        SCRIPT="$GITHUB_WORKSPACE/configs/apply_susfs_patches.sh"
-        [ -f "$SCRIPT" ] || { echo "::error::SUSFS apply script not found: $SCRIPT"; exit 1; }
-        chmod +x "$SCRIPT"
+        chmod +x "$SCRIPT"        
 
         if [ "${SUSVER:-unknown}" = "v2.3.0" ]; then
           echo "🔧 Patching OP-Sukisu SUSFS helper for v2.3.0"
