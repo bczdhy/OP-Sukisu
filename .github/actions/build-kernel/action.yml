@@ -1053,6 +1053,7 @@ runs:
         SCRIPT="$GITHUB_WORKSPACE/configs/apply_susfs_patches.sh"
         [ -f "$SCRIPT" ] || { echo "::error::SUSFS apply script not found: $SCRIPT"; exit 1; }
         chmod +x "$SCRIPT"
+        
       run: |
         set -euo pipefail
         # Full SukiSU-side SUSFS integration via configs/apply_susfs_patches.sh:
