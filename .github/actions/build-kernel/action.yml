@@ -893,33 +893,33 @@ runs:
           echo "Using SUSFS branch/commit: $SUSFS_BRANCH"
           SUSFS_URL="https://gitlab.com/simonpunk/susfs4ksu.git"
 
-rm -rf susfs4ksu
+       rm -rf susfs4ksu
 
-if [[ "$SUSFS_BRANCH" =~ ^[0-9a-fA-F]{40}$ ]]; then
-    echo "📌 SUSFS commit detected: $SUSFS_BRANCH"
+       if [[ "$SUSFS_BRANCH" =~ ^[0-9a-fA-F]{40}$ ]]; then
+       echo "📌 SUSFS commit detected: $SUSFS_BRANCH"
 
-    git clone --filter=blob:none --no-checkout \
+       git clone --filter=blob:none --no-checkout \
         "$SUSFS_URL" susfs4ksu
 
-    cd susfs4ksu
-    git fetch --depth=1 origin "$SUSFS_BRANCH"
-    git checkout --detach "$SUSFS_BRANCH"
-    cd ..
+       cd susfs4ksu
+       git fetch --depth=1 origin "$SUSFS_BRANCH"
+       git checkout --detach "$SUSFS_BRANCH"
+       cd ..
 
-else
+       else
     echo "🌿 SUSFS branch detected: $SUSFS_BRANCH"
 
     git clone --depth=1 \
         --branch "$SUSFS_BRANCH" \
         "$SUSFS_URL" susfs4ksu
-fi
+       fi
 
-echo "✅ SUSFS fetched successfully"
+    echo "✅ SUSFS fetched successfully"
 
-cd susfs4ksu
+    cd susfs4ksu
 echo "SUSFS actual commit: $(git rev-parse HEAD)"
 echo "SUSFS version: $(grep '#define SUSFS_VERSION' kernel_patches/include/linux/susfs.h || true)"
-cd ..
+      cd ..
           echo "SUSFS_COMMIT_SHA=$SUSFS_BRANCH" >> $GITHUB_ENV
         fi
 
