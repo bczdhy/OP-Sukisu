@@ -1099,34 +1099,60 @@ runs:
 
         bash "$SCRIPT"
 
-        # SUSFS <-> older-OnePlus-tree compat: neutralize susfs's spoofed-path VMA refs ---
-        # susfs4ksu 50_add_susfs (CONFIG_KSU_SUSFS_OPEN_REDIRECT hunk) adds, inside the *spoofed*
-        # branch of show_map_vma():
-        #     end = VMA_PAD_START(vma);
-        #     __fold_filemap_fixup_entry(&((struct proc_maps_private *)m->private)->iter, &end);
-        # Both come from Google's newer-ACK maps / 4kB->16kB page-migration work and are missing
-        # or mis-provided on older OnePlus tree snapshots, breaking the build three ways:
-        #   * 5.10 *_5.10.209/.226 : VMA_PAD_START macro undefined
-        #   * 6.6  *_6.6.30 / N30-SE: VMA_PAD_START + __fold_filemap_fixup_entry undefined
-        #   * some 6.1 (mt6897 A15) : VMA_PAD_START defined but expands to undeclared vma_pad_pages
-        # In the spoofed path the exact end address is cosmetic, so pin it to vma->vm_end and drop
-        # the fold. These susfs lines are uniquely deep-indented (>=3 tabs, they sit inside
-        # if(OPEN_REDIRECT){ if(!ret){ ); the tree's OWN show_map_vma/show_smap uses are 1 tab and
-        # are left untouched, so trees that properly support padding keep correct /proc maps
-        # output. Version-independent + idempotent; a no-op where susfs added nothing.
-        __TM="$COMMON_KERNEL_FOLDER/fs/proc/task_mmu.c"
-        if [ -f "$__TM" ]; then
-          __b="$(md5sum "$__TM" | cut -d' ' -f1)"
-          sed -i -E 's@^([[:blank:]]{3,})end = VMA_PAD_START\(vma\);[[:blank:]]*$@\1end = vma->vm_end;@' "$__TM"
-          sed -i -E '/^[[:blank:]]{3,}__fold_filemap_fixup_entry\(/d' "$__TM"
-          __a="$(md5sum "$__TM" | cut -d' ' -f1)"
-          if [ "$__b" != "$__a" ]; then
-            echo "Neutralized susfs OPEN_REDIRECT VMA_PAD_START/__fold refs in fs/proc/task_mmu.c"
-          else
-            echo "No deep-indented susfs VMA_PAD_START/__fold refs in task_mmu.c (nothing to neutralize)"
-          fi
+        # SukiSU/SUSFS compatibility:
+        # SUSFS v2.3.0 no longer provides the old syscall-event bridge
+        # implementation ksu_handle_stat_sucompat(). Some older SukiSU
+        # compatibility code can still leave a bridge call to that symbol.
+        # On this OP13r 6.1 tree the actual filename-based stat handler is
+        # ksu_handle_stat(), with the same (dfd, filename, flags) ABI.
+        # Replace only the stale bridge call; do not disable stat handling.
+        BRIDGE="$COMMON_KERNEL_FOLDER/KernelSU/kernel/hook/syscall_event_bridge.c"
+        if [ -f "$BRIDGE" ]; then
+          python3 - "$BRIDGE" <<'PY'
+        import sys
+        from pathlib import Path
+        
+        p = Path(sys.argv[1])
+        s = p.read_text()
+        old = "ksu_handle_stat_sucompat"
+        if old in s:
+            p.write_text(s.replace(old, "ksu_handle_stat"))
+            print(f"Replaced stale {old} bridge references with ksu_handle_stat() in {p}")
+        else:
+            print(f"No stale {old} reference found in {p}")
+        PY
         fi
-        # --------------------------------------------------------------------------------
+
+        # Also handle the drivers/ layout used by some SukiSU setup variants.
+        BRIDGE2="$COMMON_KERNEL_FOLDER/../KernelSU/kernel/hook/syscall_event_bridge.c"
+        if [ -f "$BRIDGE2" ]; then
+          python3 - "$BRIDGE2" <<'PY'
+        import sys
+        from pathlib import Path
+        
+        p = Path(sys.argv[1])
+        s = p.read_text()
+        old = "ksu_handle_stat_sucompat"
+        if old in s:
+            p.write_text(s.replace(old, "ksu_handle_stat"))
+            print(f"Replaced stale {old} bridge references with ksu_handle_stat() in {p}")
+        else:
+            print(f"No stale {old} reference found in {p}")
+        PY
+        fi
+
+        # Hard fail only if the obsolete symbol is still referenced after the
+        # compatibility rewrite. This prevents a linker/safety-sweep failure
+        # later in the job.
+        if grep -Rqs --include='*.c' --include='*.h' 'ksu_handle_stat_sucompat' \
+             "$COMMON_KERNEL_FOLDER/KernelSU" \
+             "$COMMON_KERNEL_FOLDER/../KernelSU" 2>/dev/null; then
+          echo "::error::Stale ksu_handle_stat_sucompat reference remains after SukiSU compatibility fix"
+          grep -Rns --include='*.c' --include='*.h' 'ksu_handle_stat_sucompat' \
+             "$COMMON_KERNEL_FOLDER/KernelSU" \
+             "$COMMON_KERNEL_FOLDER/../KernelSU" 2>/dev/null | head -n 40 || true
+          exit 1
+        fi
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
     
@@ -1342,15 +1368,45 @@ runs:
             patch -p1 --forward < "$KERNEL_PATCHES_FOLDER/common/unicode_bypass_fix_6.1+.patch"
         fi
 
-    - name: Add Tmpfs Support
+    - name: Add OverlayFS / Mountify Support
       shell: bash
       run: |
         set -euo pipefail
-        echo "Add Tmpfs Support"
-        cat >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" <<EOF
+        echo "::group::Add OverlayFS / Mountify support"
+        DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+
+        cat >> "$DEFCONFIG" <<'EOF'
+        CONFIG_OVERLAY_FS=y
+        CONFIG_OVERLAY_FS_INDEX=y
+        CONFIG_OVERLAY_FS_XINO_AUTO=y
+        CONFIG_OVERLAY_FS_REDIRECT_DIR=y
+        CONFIG_EXPORTFS=y
         CONFIG_TMPFS_XATTR=y
         CONFIG_TMPFS_POSIX_ACL=y
         EOF
+
+        echo "Requested OverlayFS/Mountify configuration:"
+        grep -E '^(CONFIG_OVERLAY_FS|CONFIG_EXPORTFS|CONFIG_TMPFS_(XATTR|POSIX_ACL))='           "$DEFCONFIG" | tail -n 30 || true
+        echo "::endgroup::"
+
+    - name: Verify OverlayFS source compatibility
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Verify OverlayFS source compatibility"
+        OVL_UTIL="$COMMON_KERNEL_FOLDER/fs/overlayfs/util.c"
+        OVL_PARAMS="$COMMON_KERNEL_FOLDER/fs/overlayfs/params.c"
+
+        [ -f "$OVL_UTIL" ] || { echo "::error::Missing OverlayFS source: $OVL_UTIL"; exit 1; }
+        [ -f "$OVL_PARAMS" ] || { echo "::error::Missing OverlayFS source: $OVL_PARAMS"; exit 1; }
+
+        echo "OverlayFS dentry/filesystem checks:"
+        grep -n -E 'ovl_dentry_weird|sb_has_encoding|DCACHE_OP_HASH|DCACHE_OP_COMPARE'           "$OVL_PARAMS" "$OVL_UTIL" || true
+
+        if grep -q 'ovl_dentry_weird' "$OVL_UTIL"; then
+          echo "::notice::This kernel tree retains OverlayFS dentry filtering. If Mountify later reports '/data/adb/modules/.../.payload/... not supported', the issue is filesystem/casefold compatibility, not merely CONFIG_OVERLAY_FS."
+        fi
+        echo "::endgroup::"
 
     - name: Add BBR
       if: ${{ env.OP_BBR == 'true' }}
