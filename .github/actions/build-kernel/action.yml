@@ -759,12 +759,12 @@ runs:
     - name: Fetch SusFS and Other Dependencies
 
       - name: Fetch susfs4ksu
-  run: |
-    git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
-    cd susfs4ksu
-    git checkout 5727f79e3a7175cfb0e1a754fc2ed78eaf866237
+        run: |
+         git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs4ksu
+         cd susfs4ksu
+         git checkout 5727f79e3a7175cfb0e1a754fc2ed78eaf866237
 
-      shell: bash
+         shell: bash
       run: |
         echo "::group::Fetch dependencies"
         set -euo pipefail
