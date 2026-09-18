@@ -1089,70 +1089,45 @@ runs:
         path.write_text(s)
         PY
 
-          if grep -q 'v2\.3\.0' "$SCRIPT"; then
-            echo "✅ SUSFS helper now contains v2.3.0 compatibility"
-          else
-            echo "::error::Could not add v2.3.0 compatibility to SUSFS helper"
+          # OP13r / SukiSU compatibility:
+          # The downloaded helper still contains an older syscall-event bridge
+          # contract which expects ksu_handle_stat_sucompat().  This 6.1 tree
+          # exposes the current filename-based ksu_handle_stat() handler instead.
+          #
+          # IMPORTANT: this must be fixed INSIDE the helper before it runs.
+          # A post-helper replacement is too late because the helper performs
+          # its final safety sweep before returning.
+          python3 - "$SCRIPT" <<'PY'
+        import sys
+        from pathlib import Path
+
+        p = Path(sys.argv[1])
+        s = p.read_text()
+
+        old = "ksu_handle_stat_sucompat"
+        new = "ksu_handle_stat"
+
+        count = s.count(old)
+        if count:
+            s = s.replace(old, new)
+            p.write_text(s)
+            print(f"Rewrote {count} helper reference(s): {old} -> {new}")
+        else:
+            print(f"No {old} references found in helper; leaving helper unchanged")
+        PY
+
+          # The helper itself must now contain the current stat symbol before
+          # execution. This catches a future upstream helper change early.
+          if grep -q 'ksu_handle_stat_sucompat' "$SCRIPT"; then
+            echo "::error::SukiSU helper still contains obsolete ksu_handle_stat_sucompat references"
+            grep -n 'ksu_handle_stat_sucompat' "$SCRIPT" | head -n 20 || true
             exit 1
           fi
+
+          echo "✅ SukiSU syscall-event bridge compatibility prepared before SUSFS helper execution"
         fi
 
         bash "$SCRIPT"
-
-        # SukiSU/SUSFS compatibility:
-        # SUSFS v2.3.0 no longer provides the old syscall-event bridge
-        # implementation ksu_handle_stat_sucompat(). Some older SukiSU
-        # compatibility code can still leave a bridge call to that symbol.
-        # On this OP13r 6.1 tree the actual filename-based stat handler is
-        # ksu_handle_stat(), with the same (dfd, filename, flags) ABI.
-        # Replace only the stale bridge call; do not disable stat handling.
-        BRIDGE="$COMMON_KERNEL_FOLDER/KernelSU/kernel/hook/syscall_event_bridge.c"
-        if [ -f "$BRIDGE" ]; then
-          python3 - "$BRIDGE" <<'PY'
-        import sys
-        from pathlib import Path
-        
-        p = Path(sys.argv[1])
-        s = p.read_text()
-        old = "ksu_handle_stat_sucompat"
-        if old in s:
-            p.write_text(s.replace(old, "ksu_handle_stat"))
-            print(f"Replaced stale {old} bridge references with ksu_handle_stat() in {p}")
-        else:
-            print(f"No stale {old} reference found in {p}")
-        PY
-        fi
-
-        # Also handle the drivers/ layout used by some SukiSU setup variants.
-        BRIDGE2="$COMMON_KERNEL_FOLDER/../KernelSU/kernel/hook/syscall_event_bridge.c"
-        if [ -f "$BRIDGE2" ]; then
-          python3 - "$BRIDGE2" <<'PY'
-        import sys
-        from pathlib import Path
-        
-        p = Path(sys.argv[1])
-        s = p.read_text()
-        old = "ksu_handle_stat_sucompat"
-        if old in s:
-            p.write_text(s.replace(old, "ksu_handle_stat"))
-            print(f"Replaced stale {old} bridge references with ksu_handle_stat() in {p}")
-        else:
-            print(f"No stale {old} reference found in {p}")
-        PY
-        fi
-
-        # Hard fail only if the obsolete symbol is still referenced after the
-        # compatibility rewrite. This prevents a linker/safety-sweep failure
-        # later in the job.
-        if grep -Rqs --include='*.c' --include='*.h' 'ksu_handle_stat_sucompat' \
-             "$COMMON_KERNEL_FOLDER/KernelSU" \
-             "$COMMON_KERNEL_FOLDER/../KernelSU" 2>/dev/null; then
-          echo "::error::Stale ksu_handle_stat_sucompat reference remains after SukiSU compatibility fix"
-          grep -Rns --include='*.c' --include='*.h' 'ksu_handle_stat_sucompat' \
-             "$COMMON_KERNEL_FOLDER/KernelSU" \
-             "$COMMON_KERNEL_FOLDER/../KernelSU" 2>/dev/null | head -n 40 || true
-          exit 1
-        fi
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
     
