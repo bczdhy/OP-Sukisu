@@ -1164,6 +1164,7 @@ runs:
         bash "$SCRIPT"
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
+        fi
     
     - name: Add BBG
       if: ${{ env.OP_BBG == 'true' }}
