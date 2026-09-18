@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+_op13r_root="${_op13r_root:-}"
+_bridge_list="${_bridge_list:-}"
 # FIX: Initialize empty variables to prevent 'unbound variable' errors on strict mode
 _op13r_root="${_op13r_root:-}"
 _bridge_list="${_bridge_list:-}"
