@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+#!/usr/bin/env bash
+set -euo pipefail
 
+# FIX: Initialize empty variables to prevent 'unbound variable' errors on strict mode
+_op13r_root="${_op13r_root:-}"
+_bridge_list="${_bridge_list:-}"
 echo "::group::Apply SUSFS patches"
 
 required_env=(
