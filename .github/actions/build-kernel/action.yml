@@ -1056,38 +1056,38 @@ runs:
           echo "🔧 Patching OP-Sukisu SUSFS helper for v2.3.0"
 
           python3 - "$SCRIPT" <<'PY'
-import re
-import sys
-from pathlib import Path
+          import re
+          import sys
+          from pathlib import Path
 
-path = Path(sys.argv[1])
-s = path.read_text()
+          path = Path(sys.argv[1])
+          s = path.read_text()
 
-# Allow-list forms.
-s = s.replace("v2.1.0|v2.2.0", "v2.1.0|v2.2.0|v2.3.0")
-s = s.replace("v2.1.0|v2.2.0)", "v2.1.0|v2.2.0|v2.3.0)")
+          # Allow-list forms.
+          s = s.replace("v2.1.0|v2.2.0", "v2.1.0|v2.2.0|v2.3.0")
+          s = s.replace("v2.1.0|v2.2.0)", "v2.1.0|v2.2.0|v2.3.0)")
 
-# [[ "$SUSFS_VERSION" != "v2.1.0" && "$SUSFS_VERSION" != "v2.2.0" ]]
-s = re.sub(
-    r'(\[\[\s*"\$SUSFS_VERSION"\s*!=\s*"v2\.1\.0"\s*&&\s*"\$SUSFS_VERSION"\s*!=\s*"v2\.2\.0")',
-    r'\1 && "$SUSFS_VERSION" != "v2.3.0"',
-    s,
-)
+          # [[ "$SUSFS_VERSION" != "v2.1.0" && "$SUSFS_VERSION" != "v2.2.0" ]]
+          s = re.sub(
+              r'(\[\[\s*"\$SUSFS_VERSION"\s*!=\s*"v2\.1\.0"\s*&&\s*"\$SUSFS_VERSION"\s*!=\s*"v2\.2\.0")',
+              r'\1 && "$SUSFS_VERSION" != "v2.3.0"',
+              s,
+          )
 
-# [[ $SUSFS_VERSION != "v2.1.0" && $SUSFS_VERSION != "v2.2.0" ]]
-s = re.sub(
-    r'(\[\[\s*\$SUSFS_VERSION\s*!=\s*"v2\.1\.0"\s*&&\s*\$SUSFS_VERSION\s*!=\s*"v2\.2\.0")',
-    r'\1 && $SUSFS_VERSION != "v2.3.0"',
-    s,
-)
+          # [[ $SUSFS_VERSION != "v2.1.0" && $SUSFS_VERSION != "v2.2.0" ]]
+          s = re.sub(
+              r'(\[\[\s*\$SUSFS_VERSION\s*!=\s*"v2\.1\.0"\s*&&\s*\$SUSFS_VERSION\s*!=\s*"v2\.2\.0")',
+              r'\1 && $SUSFS_VERSION != "v2.3.0"',
+              s,
+          )
 
-s = s.replace(
-    "This workflow step supports SUSFS v2.1.0 and v2.2.0 only.",
-    "This workflow step supports SUSFS v2.1.0, v2.2.0, and v2.3.0."
-)
+          s = s.replace(
+              "This workflow step supports SUSFS v2.1.0 and v2.2.0 only.",
+              "This workflow step supports SUSFS v2.1.0, v2.2.0, and v2.3.0."
+          )
 
-path.write_text(s)
-PY
+          path.write_text(s)
+          PY
 
           if grep -q 'v2\.3\.0' "$SCRIPT"; then
             echo "✅ SUSFS helper now contains v2.3.0 compatibility"
