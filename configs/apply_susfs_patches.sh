@@ -287,6 +287,37 @@ echo "✅ Added local static bool ksu_no_custom_rc = false to $target"
   fi
 }
 
+fix_op61_selinux_hide_backup_lifetime() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  local target="$1"
+  [ -f "$target" ] || return 0
+
+  python3 - "$target" <<'PY_OP61_BACKUP'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text()
+pattern = re.compile(r'(?ms)^void ksu_selinux_hide_drop_backup_if_unused\(\)\n\{.*?^\}\n')
+replacement = """void ksu_selinux_hide_drop_backup_if_unused()
+{
+    /* OP13R/Android14/6.1: keep the policy backup available for a
+     * runtime Manager enable. Upstream drops it at boot when the feature
+     * was not already running, which makes a late SET_FEATURE return -EAGAIN.
+     */
+    pr_info("selinux_hide: OP61 keeping backup_sepolicy for runtime enable\\n");
+}
+"""
+s2, n = pattern.subn(lambda m: replacement, s, count=1)
+if n:
+    p.write_text(s2)
+    print('OP 6.1: preserved backup_sepolicy for runtime selinux_hide enable in', p)
+elif 'OP61 keeping backup_sepolicy for runtime enable' in s:
+    print('OP 6.1: backup_sepolicy runtime preservation already present in', p)
+else:
+    raise SystemExit('OP61: ksu_selinux_hide_drop_backup_if_unused() not found in ' + str(p))
+PY_OP61_BACKUP
+}
+
 fix_sukisu_selinux_hide_c() {
   local target="$1"
   [ -f "$target" ] || return 0
@@ -1411,6 +1442,7 @@ ensure_sukisu_inline_hook_init  "kernel/core/init.c"
 fix_sukisu_boot_event_c         "kernel/runtime/boot_event.c"
 fix_sukisu_ksud_integration_c   "kernel/runtime/ksud_integration.c"
 fix_sukisu_selinux_hide_c       "kernel/feature/selinux_hide.c"
+fix_op61_selinux_hide_backup_lifetime "kernel/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "kernel/policy/app_profile.c"
 fix_sukisu_dispatch_c           "kernel/supercall/dispatch.c"
 fix_sukisu_sucompat_api         "kernel"
@@ -1469,6 +1501,7 @@ ensure_sukisu_inline_hook_init  "drivers/kernelsu/core/init.c"
 fix_sukisu_boot_event_c         "drivers/kernelsu/runtime/boot_event.c"
 fix_sukisu_ksud_integration_c   "drivers/kernelsu/runtime/ksud_integration.c"
 fix_sukisu_selinux_hide_c       "drivers/kernelsu/feature/selinux_hide.c"
+fix_op61_selinux_hide_backup_lifetime "drivers/kernelsu/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "drivers/kernelsu/policy/app_profile.c"
 fix_sukisu_dispatch_c           "drivers/kernelsu/supercall/dispatch.c"
 fix_sukisu_sucompat_api         "drivers/kernelsu"
