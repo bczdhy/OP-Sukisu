@@ -216,7 +216,6 @@ ensure_sukisu_inline_hook_init() {
 }
 
 fix_sukisu_boot_event_c() {
-preserve_selinux_hide_backup
   local target="$1"
   [ -f "$target" ] || return 0
 
@@ -254,43 +253,6 @@ exit 1
   fi
 
   echo "✅ Fixed $target"
-}
-
-preserve_selinux_hide_backup() {
-  # selinux_hide requires the pristine policy snapshot to remain available
-  # until the feature is actually enabled. Some Android 14/6.1 trees call
-  # this cleanup from boot-complete; remove that cleanup in every copy of
-  # boot_event.c that the build may use.
-  local f
-  for f in \
-    "drivers/kernelsu/runtime/boot_event.c" \
-    "$KSU_FOLDER/kernel/runtime/boot_event.c" \
-    "drivers/kernelsu/kernel/runtime/boot_event.c"; do
-    [ -f "$f" ] || continue
-
-    sed -i '/ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();/d' "$f"
-
-    # Keep an explicit marker in the generated source for post-build auditing.
-    if ! grep -q 'selinux_hide: backup_sepolicy preservation patch' "$f"; then
-      sed -i '1i/* selinux_hide: backup_sepolicy preservation patch */' "$f"
-    fi
-    echo "OP13R SELinux hide: preserving backup_sepolicy in $f"
-  done
-}
-
-verify_selinux_hide_fix() {
-  local f
-  for f in \
-    "drivers/kernelsu/runtime/boot_event.c" \
-    "$KSU_FOLDER/kernel/runtime/boot_event.c" \
-    "drivers/kernelsu/kernel/runtime/boot_event.c"; do
-    [ -f "$f" ] || continue
-    if grep -q 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' "$f"; then
-      echo "::error::SELinux hide backup is still discarded in $f"
-      return 1
-    fi
-  done
-  echo "OP13R SELinux hide: source verification passed"
 }
 
 fix_sukisu_ksud_integration_c() {
@@ -1198,18 +1160,23 @@ fix_op61_lsm_hook_kcfi() {
   python3 - "$target" <<'PY_OP61_LSM'
 from pathlib import Path
 import sys
+
 p = Path(sys.argv[1])
 s = p.read_text()
-if 'static bool ksu_lsm_hook_target_matches' not in s:
-    inc = """
+
+# Android 14 / 6.1 GKI commonly uses Clang KCFI + LTO. The address stored in
+# security_hook_heads->setprocattr can be an LTO local alias / folded symbol,
+# while kallsyms resolves the canonical selinux_setprocattr address.
+#
+# SukiSU issue #920 documents the failure mode and recommends matching the
+# stored hook address against the complete symbol range obtained through
+# kallsyms_lookup_size_offset(), rather than requiring exact pointer equality.
+matcher = r'''
 static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
 {
-    unsigned long target_start;
-    unsigned long target_size = 0;
-    unsigned long current_start;
-    unsigned long current_size = 0;
-    unsigned long target_end;
-    unsigned long current_end;
+    unsigned long start;
+    unsigned long size = 0;
+    unsigned long end;
 
     if (!current_origin || !target)
         return false;
@@ -1217,51 +1184,36 @@ static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
     if (current_origin == target)
         return true;
 
-    target_start = (unsigned long)target;
-    current_start = (unsigned long)current_origin;
+    start = (unsigned long)target;
 
-    /*
-     * Android 14 / 6.1 OnePlus GKI builds may use KCFI/LTO. In that case
-     * the pointer stored in security_hook_heads can be an LTO-local alias
-     * of the function resolved from kallsyms. Do not require exact pointer
-     * equality: accept overlapping symbol/function ranges in either
-     * direction. The symmetric check matters when kallsyms resolves the
-     * alias rather than the canonical function.
-     */
-    if (kallsyms_lookup_size_offset(target_start, &target_size, NULL) &&
-        target_size) {
-        target_end = target_start + target_size;
-        if (current_start >= target_start && current_start < target_end)
-            return true;
-    }
+    if (!kallsyms_lookup_size_offset(start, &size, NULL) || !size)
+        return false;
 
-    if (kallsyms_lookup_size_offset(current_start, &current_size, NULL) &&
-        current_size) {
-        current_end = current_start + current_size;
-        if (target_start >= current_start && target_start < current_end)
-            return true;
-
-        if (target_size && current_start < target_end && target_start < current_end)
-            return true;
-    }
-
-    return false;
+    end = start + size;
+    return (unsigned long)current_origin >= start &&
+           (unsigned long)current_origin < end;
 }
-"""
+'''
+
+if 'static bool ksu_lsm_hook_target_matches' not in s:
     anchor = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
-    if anchor not in s: raise SystemExit('OP61: lsm_hook lock anchor not found')
-    s = s.replace(anchor, inc + '\n' + anchor, 1)
-old='if (current_origin == target) {'
-count=s.count(old)
+    if anchor not in s:
+        raise SystemExit('OP61: lsm_hook lock anchor not found')
+    s = s.replace(anchor, matcher + '\n' + anchor, 1)
+
+old = 'if (current_origin == target) {'
+new = 'if (ksu_lsm_hook_target_matches(current_origin, target)) {'
+count = s.count(old)
+
 if count:
-    s=s.replace(old, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {')
+    s = s.replace(old, new)
     print(f'OP 6.1: KCFI/LTO address-range matching applied to {p} ({count} comparisons)')
-elif 'ksu_lsm_hook_target_matches(current_origin, target)' in s:
+elif new in s:
     print(f'OP 6.1: KCFI/LTO address-range matching already present in {p}')
 else:
     raise SystemExit('OP61: no target comparison in lsm_hook.c and matcher is not present')
+
 p.write_text(s)
-print(f'OP 6.1: KCFI/LTO address-range matching applied to {p} ({count} comparisons)')
 PY_OP61_LSM
 }
 
@@ -1488,7 +1440,6 @@ fi
 
 ensure_op61_lsm_hook_state "drivers/kernelsu/hook/lsm_hook.c"
 fix_op61_lsm_hook_kcfi "drivers/kernelsu/hook/lsm_hook.c"
-fix_op61_lsm_hook_kcfi "$KSU_FOLDER/kernel/hook/lsm_hook.c"
 
 sed -i 's/is_zygote_normal_app_uid(new_uid)/is_appuid(new_uid)/' drivers/kernelsu/hook/setuid_hook.c 2>/dev/null || true
 # Only stub out ksu_handle_extra_susfs_work() when susfs_extra_works is NOT provided by the
@@ -1516,7 +1467,6 @@ fi
 ensure_susfs_init_call          "drivers/kernelsu/core/init.c"
 ensure_sukisu_inline_hook_init  "drivers/kernelsu/core/init.c"
 fix_sukisu_boot_event_c         "drivers/kernelsu/runtime/boot_event.c"
-preserve_selinux_hide_backup
 fix_sukisu_ksud_integration_c   "drivers/kernelsu/runtime/ksud_integration.c"
 fix_sukisu_selinux_hide_c       "drivers/kernelsu/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "drivers/kernelsu/policy/app_profile.c"
@@ -1876,11 +1826,6 @@ fi
   done
 fi
 
-if [ -f drivers/kernelsu/runtime/boot_event.c ] && grep -n 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' drivers/kernelsu/runtime/boot_event.c; then
-  echo "::error::selinux_hide backup is still dropped at boot-complete in drivers/kernelsu/runtime/boot_event.c"
-  exit 1
-fi
-
 if [ -f drivers/kernelsu/feature/selinux_hide.c ]; then
   if grep -nE 'ksu_late_loaded' drivers/kernelsu/feature/selinux_hide.c; then
     echo "::error::ksu_late_loaded still exists in drivers/kernelsu/feature/selinux_hide.c"; exit 1
@@ -2214,5 +2159,3 @@ fi
 
 echo "✅ SUSFS patches applied successfully"
 echo "::endgroup::"
-
-verify_selinux_hide_fix
