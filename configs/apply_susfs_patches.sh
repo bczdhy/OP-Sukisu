@@ -255,6 +255,19 @@ exit 1
   echo "✅ Fixed $target"
 }
 
+preserve_selinux_hide_backup() {
+  # Keep backup_sepolicy available so the Manager can enable selinux_hide
+  # after boot instead of receiving -EAGAIN after boot-complete cleanup.
+  local target
+  for target in     "drivers/kernelsu/runtime/boot_event.c"     "$KSU_FOLDER/kernel/runtime/boot_event.c"; do
+    [ -f "$target" ] || continue
+    if grep -q 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' "$target"; then
+      sed -i '/ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();/d' "$target"
+      echo "OP 6.1: preserved backup_sepolicy for runtime selinux_hide toggles in $target"
+    fi
+  done
+}
+
 fix_sukisu_ksud_integration_c() {
   local target="$1"
   [ -f "$target" ] || return 0
@@ -1166,18 +1179,48 @@ if 'static bool ksu_lsm_hook_target_matches' not in s:
     inc = """
 static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
 {
-    unsigned long start;
-    unsigned long size = 0;
-    unsigned long current_addr;
+    unsigned long target_start;
+    unsigned long target_size = 0;
+    unsigned long current_start;
+    unsigned long current_size = 0;
+    unsigned long target_end;
+    unsigned long current_end;
+
     if (!current_origin || !target)
         return false;
+
     if (current_origin == target)
         return true;
-    start = (unsigned long)target;
-    current_addr = (unsigned long)current_origin;
-    if (!kallsyms_lookup_size_offset(start, &size, NULL) || !size)
-        return false;
-    return current_addr >= start && current_addr < start + size;
+
+    target_start = (unsigned long)target;
+    current_start = (unsigned long)current_origin;
+
+    /*
+     * Android 14 / 6.1 OnePlus GKI builds may use KCFI/LTO. In that case
+     * the pointer stored in security_hook_heads can be an LTO-local alias
+     * of the function resolved from kallsyms. Do not require exact pointer
+     * equality: accept overlapping symbol/function ranges in either
+     * direction. The symmetric check matters when kallsyms resolves the
+     * alias rather than the canonical function.
+     */
+    if (kallsyms_lookup_size_offset(target_start, &target_size, NULL) &&
+        target_size) {
+        target_end = target_start + target_size;
+        if (current_start >= target_start && current_start < target_end)
+            return true;
+    }
+
+    if (kallsyms_lookup_size_offset(current_start, &current_size, NULL) &&
+        current_size) {
+        current_end = current_start + current_size;
+        if (target_start >= current_start && target_start < current_end)
+            return true;
+
+        if (target_size && current_start < target_end && target_start < current_end)
+            return true;
+    }
+
+    return false;
 }
 """
     anchor = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
@@ -1415,6 +1458,7 @@ fi
 
 ensure_op61_lsm_hook_state "drivers/kernelsu/hook/lsm_hook.c"
 fix_op61_lsm_hook_kcfi "drivers/kernelsu/hook/lsm_hook.c"
+fix_op61_lsm_hook_kcfi "$KSU_FOLDER/kernel/hook/lsm_hook.c"
 
 sed -i 's/is_zygote_normal_app_uid(new_uid)/is_appuid(new_uid)/' drivers/kernelsu/hook/setuid_hook.c 2>/dev/null || true
 # Only stub out ksu_handle_extra_susfs_work() when susfs_extra_works is NOT provided by the
@@ -1442,6 +1486,7 @@ fi
 ensure_susfs_init_call          "drivers/kernelsu/core/init.c"
 ensure_sukisu_inline_hook_init  "drivers/kernelsu/core/init.c"
 fix_sukisu_boot_event_c         "drivers/kernelsu/runtime/boot_event.c"
+preserve_selinux_hide_backup
 fix_sukisu_ksud_integration_c   "drivers/kernelsu/runtime/ksud_integration.c"
 fix_sukisu_selinux_hide_c       "drivers/kernelsu/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "drivers/kernelsu/policy/app_profile.c"
@@ -1799,6 +1844,11 @@ if grep -RqsE "\b(void|int)([[:space:]]+__[a-z_]+)*[[:space:]]+${_fn}[[:space:]]
   echo "✅ ${_fn}() call present in drivers/kernelsu/core/init.c"
 fi
   done
+fi
+
+if [ -f drivers/kernelsu/runtime/boot_event.c ] && grep -n 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' drivers/kernelsu/runtime/boot_event.c; then
+  echo "::error::selinux_hide backup is still dropped at boot-complete in drivers/kernelsu/runtime/boot_event.c"
+  exit 1
 fi
 
 if [ -f drivers/kernelsu/feature/selinux_hide.c ]; then
