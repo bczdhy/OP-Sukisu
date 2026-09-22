@@ -216,6 +216,7 @@ ensure_sukisu_inline_hook_init() {
 }
 
 fix_sukisu_boot_event_c() {
+preserve_selinux_hide_backup
   local target="$1"
   [ -f "$target" ] || return 0
 
@@ -256,16 +257,40 @@ exit 1
 }
 
 preserve_selinux_hide_backup() {
-  # Keep backup_sepolicy available so the Manager can enable selinux_hide
-  # after boot instead of receiving -EAGAIN after boot-complete cleanup.
-  local target
-  for target in     "drivers/kernelsu/runtime/boot_event.c"     "$KSU_FOLDER/kernel/runtime/boot_event.c"; do
-    [ -f "$target" ] || continue
-    if grep -q 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' "$target"; then
-      sed -i '/ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();/d' "$target"
-      echo "OP 6.1: preserved backup_sepolicy for runtime selinux_hide toggles in $target"
+  # selinux_hide requires the pristine policy snapshot to remain available
+  # until the feature is actually enabled. Some Android 14/6.1 trees call
+  # this cleanup from boot-complete; remove that cleanup in every copy of
+  # boot_event.c that the build may use.
+  local f
+  for f in \
+    "drivers/kernelsu/runtime/boot_event.c" \
+    "$KSU_FOLDER/kernel/runtime/boot_event.c" \
+    "drivers/kernelsu/kernel/runtime/boot_event.c"; do
+    [ -f "$f" ] || continue
+
+    sed -i '/ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();/d' "$f"
+
+    # Keep an explicit marker in the generated source for post-build auditing.
+    if ! grep -q 'selinux_hide: backup_sepolicy preservation patch' "$f"; then
+      sed -i '1i/* selinux_hide: backup_sepolicy preservation patch */' "$f"
+    fi
+    echo "OP13R SELinux hide: preserving backup_sepolicy in $f"
+  done
+}
+
+verify_selinux_hide_fix() {
+  local f
+  for f in \
+    "drivers/kernelsu/runtime/boot_event.c" \
+    "$KSU_FOLDER/kernel/runtime/boot_event.c" \
+    "drivers/kernelsu/kernel/runtime/boot_event.c"; do
+    [ -f "$f" ] || continue
+    if grep -q 'ksu_selinux_hide_drop_backup_if_unused[[:space:]]*();' "$f"; then
+      echo "::error::SELinux hide backup is still discarded in $f"
+      return 1
     fi
   done
+  echo "OP13R SELinux hide: source verification passed"
 }
 
 fix_sukisu_ksud_integration_c() {
@@ -1228,8 +1253,13 @@ static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
     s = s.replace(anchor, inc + '\n' + anchor, 1)
 old='if (current_origin == target) {'
 count=s.count(old)
-if count == 0: raise SystemExit('OP61: no target comparison in lsm_hook.c')
-s=s.replace(old, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {')
+if count:
+    s=s.replace(old, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {')
+    print(f'OP 6.1: KCFI/LTO address-range matching applied to {p} ({count} comparisons)')
+elif 'ksu_lsm_hook_target_matches(current_origin, target)' in s:
+    print(f'OP 6.1: KCFI/LTO address-range matching already present in {p}')
+else:
+    raise SystemExit('OP61: no target comparison in lsm_hook.c and matcher is not present')
 p.write_text(s)
 print(f'OP 6.1: KCFI/LTO address-range matching applied to {p} ({count} comparisons)')
 PY_OP61_LSM
@@ -2184,3 +2214,5 @@ fi
 
 echo "✅ SUSFS patches applied successfully"
 echo "::endgroup::"
+
+verify_selinux_hide_fix
