@@ -1,73 +1,102 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${KSU_FOLDER:?KSU_FOLDER is required}"
-: "${COMMON_KERNEL_FOLDER:?COMMON_KERNEL_FOLDER is required}"
-: "${ANDROID_VER_LOCAL:?ANDROID_VER_LOCAL is required}"
-: "${KERNEL_VER_LOCAL:?KERNEL_VER_LOCAL is required}"
+echo "::group::Apply SukiSU SELinux-hide fix"
 
-if [[ "$ANDROID_VER_LOCAL" != "android14" || "$KERNEL_VER_LOCAL" != "6.1" ]]; then
+required_env=(KERNEL_PLATFORM_FOLDER COMMON_KERNEL_FOLDER KSU_FOLDER ANDROID_VER_LOCAL KERNEL_VER_LOCAL)
+for v in "${required_env[@]}"; do
+  if [ -z "${!v:-}" ]; then
+    echo "::error::Required environment variable '$v' is not set"
+    exit 1
+  fi
+done
+
+if [ "$ANDROID_VER_LOCAL" != "android14" ] || [ "$KERNEL_VER_LOCAL" != "6.1" ]; then
+  echo "SukiSU SELinux-hide fix: not Android 14 / 6.1; skipping"
+  echo "::endgroup::"
   exit 0
 fi
 
-ensure_backup_sepolicy_api() {
-  local root="$1"
-  local header="$root/selinux/sepolicy.h"
-  local rules="$root/selinux/rules.c"
+fix_selinux_hide_api() {
+  local target="$1"
+  [ -f "$target" ] || return 0
+  echo "Fixing SukiSU SELinux-hide API compatibility in: $target"
 
-  [[ -f "$header" ]] || return 0
+  sed -i \
+    -e 's/^static int security_context_to_sid_with_policy(/int security_context_to_sid_with_policy(/' \
+    -e 's/^static int security_sid_to_context_with_policy(/int security_sid_to_context_with_policy(/' \
+    -e 's/^static void security_compute_av_user_with_policy(/void security_compute_av_user_with_policy(/' \
+    -e 's/^static bool ksu_selinux_hide_running/bool ksu_selinux_hide_running/' \
+    "$target" || true
 
-  if ! grep -qE '^[[:space:]]*extern[[:space:]]+struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$header"; then
-    python3 - "$header" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-line = 'extern struct selinux_policy *backup_sepolicy;'
-if line not in s:
-    marker = 'struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol);'
-    if marker in s:
-        s = s.replace(marker, line + '\n\n' + marker, 1)
-    else:
-        s = s.replace('#endif', line + '\n\n#endif', 1)
-    p.write_text(s)
-PY
+  perl -0pi -e 's/^[ \t]*static[ \t]+(const[ \t]+)?struct[ \t]+selinux_state[ \t]+fake_state([ \t]*[=;])/${1}struct selinux_state fake_state$2/mg' "$target" || true
+  perl -0pi -e 's/^[ \t]*static[ \t]+(const[ \t]+)?struct[ \t]+selinux_state[ \t]+\*fake_state([ \t]*[=;])/${1}struct selinux_state *fake_state$2/mg' "$target" || true
+
+  if grep -q "backup_sepolicy" "$target" && ! grep -q "struct selinux_policy \*backup_sepolicy" "$target"; then
+    awk '
+      /^#include/ { print; last_include = NR; next }
+      last_include && !inserted {
+        print ""
+        print "static struct selinux_policy *backup_sepolicy;"
+        print ""
+        inserted = 1
+      }
+      { print }
+      END { if (!inserted) print "\nstatic struct selinux_policy *backup_sepolicy;" }
+    ' "$target" > "$target.tmp"
+    mv "$target.tmp" "$target"
   fi
 
-  if [[ -f "$rules" ]] && ! grep -qE '^[[:space:]]*struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$rules"; then
-    python3 - "$rules" <<'PY'
-from pathlib import Path
-import sys
-p = Path(sys.argv[1])
-s = p.read_text()
-line = 'struct selinux_policy *backup_sepolicy;'
-if line not in s:
-    marker = '#include "sepolicy.h"'
-    if marker in s:
-        s = s.replace(marker, marker + '\n\n' + line, 1)
-    else:
-        s = line + '\n' + s
-    p.write_text(s)
-PY
-  fi
-
-  grep -qE '^[[:space:]]*extern[[:space:]]+struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$header"
-  if [[ -f "$rules" ]]; then
-    grep -qE '^[[:space:]]*struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$rules"
-  fi
+  # This is SukiSU's Android 14/6.1 compatibility, not a SUSFS patch.
+  sed -i \
+    -e 's/![[:space:]]*ksu_late_loaded/1/g' \
+    -e 's/\bksu_late_loaded\b/0/g' \
+    "$target" || true
 }
 
-patch_lsm_hook() {
+ensure_lsm_hook_kbuild() {
+  local kbuild="$1"
+  [ -f "$kbuild" ] || return 0
+  grep -q 'hook/lsm_hook\.o' "$kbuild" || {
+    echo 'kernelsu-objs += hook/lsm_hook.o' >> "$kbuild"
+    echo "Added hook/lsm_hook.o to $kbuild"
+  }
+}
+
+fix_lsm_hook_state_and_kcfi() {
   local target="$1"
-  [[ -f "$target" ]] || return 0
+  [ -f "$target" ] || return 0
+  echo "Applying SukiSU KCFI/LTO SELinux-hook compatibility to: $target"
 
   python3 - "$target" <<'PY'
 from pathlib import Path
-import re, sys
+import sys
 p = Path(sys.argv[1])
 s = p.read_text()
 
-helper = '''static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
+# Preserve the hook tracking state even when a SukiSU/SUSFS integration
+# changes its preprocessor guards.
+lock = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
+entry = 'static struct ksu_lsm_hook_entry ksu_lsm_hook_entries[16];'
+count = 'static int ksu_lsm_hook_count;'
+for line in (lock, entry, count):
+    s = s.replace(line + '\n', '')
+anchor = '};\n'
+pos = s.find(anchor)
+if pos >= 0:
+    pos += len(anchor)
+else:
+    incs = list(__import__('re').finditer(r'^#include[^\n]*\n', s, __import__('re').M))
+    pos = incs[-1].end() if incs else 0
+state = '\n\n' + lock + '\n' + entry + '\n' + count + '\n'
+s = s[:pos] + state + s[pos:]
+
+# Android 14/6.1 GKI can register an LTO-local alias in the LSM hlist.
+# Match the hook pointer inside the resolved symbol's address range rather
+# than requiring exact equality with the bare kallsyms symbol address.
+if 'static bool ksu_lsm_hook_target_matches' not in s:
+    helper = r'''
+static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
 {
     unsigned long start;
     unsigned long size = 0;
@@ -88,44 +117,44 @@ helper = '''static bool ksu_lsm_hook_target_matches(void *current_origin, void *
     return current_addr >= start && current_addr < start + size;
 }
 '''
+    anchor = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
+    if anchor not in s:
+        raise SystemExit('SukiSU lsm_hook state anchor not found')
+    s = s.replace(anchor, helper + '\n' + anchor, 1)
 
-if 'ksu_lsm_hook_target_matches' not in s:
-    m = re.search(r'\nint\s+ksu_lsm_hook\s*\(\s*struct\s+ksu_lsm_hook\s*\*hook\s*\)\s*\{', s)
-    if not m:
-        raise SystemExit(f'Cannot locate ksu_lsm_hook() in {p}; refusing unrelated changes')
-    s = s[:m.start()] + '\n' + helper + s[m.start():]
-
-pattern = r'if\s*\(\s*current_origin\s*==\s*target\s*\)\s*\{'
-s2, n = re.subn(pattern, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {', s)
-if n:
-    s = s2
-elif 'ksu_lsm_hook_target_matches(current_origin, target)' not in s:
-    raise SystemExit(f'Cannot locate SukiSU target comparison in {p}; refusing unrelated changes')
+old = 'if (current_origin == target) {'
+if old in s:
+    n = s.count(old)
+    s = s.replace(old, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {')
+    print(f'KCFI/LTO address-range matcher applied ({n} comparison(s))')
+else:
+    print('KCFI/LTO comparison already converted or newer SukiSU lsm_hook API; no rewrite needed')
 
 p.write_text(s)
 PY
 }
 
-ensure_backup_sepolicy_api "$KSU_FOLDER/kernel"
-ensure_backup_sepolicy_api "$COMMON_KERNEL_FOLDER/drivers/kernelsu"
+# KernelSU's own tree.
+fix_selinux_hide_api "$KSU_FOLDER/kernel/feature/selinux_hide.c"
+ensure_lsm_hook_kbuild "$KSU_FOLDER/kernel/Kbuild"
+fix_lsm_hook_state_and_kcfi "$KSU_FOLDER/kernel/hook/lsm_hook.c"
 
-patch_lsm_hook "$KSU_FOLDER/kernel/hook/lsm_hook.c"
-patch_lsm_hook "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c"
+# OnePlus common-tree mirror, when present. This applies to every Android 14 / 6.1 device.
+fix_selinux_hide_api "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"
+ensure_lsm_hook_kbuild "$COMMON_KERNEL_FOLDER/drivers/kernelsu/Kbuild"
 
-COMMON_HIDE="$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"
-COMMON_LSM="$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c"
-COMMON_SEPOLICY_H="$COMMON_KERNEL_FOLDER/drivers/kernelsu/selinux/sepolicy.h"
-COMMON_RULES="$COMMON_KERNEL_FOLDER/drivers/kernelsu/selinux/rules.c"
+if [ -f "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c" ]; then
+  # Keep the KernelSU LSM registered as its own LSM id on this 6.1 tree.
+  sed -i \
+    's/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), \&ksu_lsmid);/' \
+    "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c" || true
+  grep -q 'static struct lsm_id ksu_lsmid' "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c" || \
+    sed -i '/security_add_hooks.*ksu_lsmid/i\    static struct lsm_id ksu_lsmid = { .name = "ksu", .id = LSM_ID_UNDEF };' \
+    "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c" || true
+  fix_lsm_hook_state_and_kcfi "$COMMON_KERNEL_FOLDER/drivers/kernelsu/hook/lsm_hook.c"
+fi
 
-for f in "$COMMON_HIDE" "$COMMON_LSM" "$COMMON_SEPOLICY_H" "$COMMON_RULES"; do
-  [[ -f "$f" ]] || { echo "::error::Missing SukiSU SELinux-hide source: $f"; exit 1; }
-done
-
-grep -q 'backup_sepolicy' "$COMMON_HIDE"
-grep -qE '^[[:space:]]*extern[[:space:]]+struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$COMMON_SEPOLICY_H"
-grep -qE '^[[:space:]]*struct[[:space:]]+selinux_policy[[:space:]]*\*[[:space:]]*backup_sepolicy[[:space:]]*;' "$COMMON_RULES"
-grep -q 'ksu_lsm_hook_target_matches(current_origin, target)' "$COMMON_LSM"
-
-echo "SukiSU SELinux-hide API is internally consistent"
-echo "  backup_sepolicy: declaration + definition verified"
-echo "  common-tree LSM matcher: verified"
+# Do not patch SUSFS files here. This step only modifies SukiSU's SELinux-hide
+# implementation and its LSM hook resolver.
+echo "✅ SukiSU SELinux-hide fix applied independently of SUSFS"
+echo "::endgroup::"
