@@ -287,6 +287,63 @@ echo "✅ Added local static bool ksu_no_custom_rc = false to $target"
   fi
 }
 
+fix_sukisu_selinux_hide_c() {
+  local target="$1"
+  [ -f "$target" ] || return 0
+
+  echo "Fixing SukiSU selinux_hide compatibility in: $target"
+
+  sed -i \
+-e 's/^static int security_context_to_sid_with_policy(/int security_context_to_sid_with_policy(/' \
+-e 's/^static int security_sid_to_context_with_policy(/int security_sid_to_context_with_policy(/' \
+-e 's/^static void security_compute_av_user_with_policy(/void security_compute_av_user_with_policy(/' \
+-e 's/^static bool ksu_selinux_hide_running/bool ksu_selinux_hide_running/' \
+"$target" || true
+
+  perl -0pi -e 's/^[ \t]*static[ \t]+(const[ \t]+)?struct[ \t]+selinux_state[ \t]+fake_state([ \t]*[=;])/${1}struct selinux_state fake_state$2/mg' "$target" || true
+  perl -0pi -e 's/^[ \t]*static[ \t]+(const[ \t]+)?struct[ \t]+selinux_state[ \t]+\*fake_state([ \t]*[=;])/${1}struct selinux_state *fake_state$2/mg' "$target" || true
+
+  if grep -q "backup_sepolicy" "$target" && ! grep -q "struct selinux_policy \*backup_sepolicy" "$target"; then
+awk '
+  /^#include/ { print; last_include = NR; next }
+  last_include && !inserted {
+    print ""
+    print "static struct selinux_policy *backup_sepolicy;"
+    print ""
+    inserted = 1
+  }
+  { print }
+  END {
+    if (!inserted) {
+      print ""
+      print "static struct selinux_policy *backup_sepolicy;"
+    }
+  }
+' "$target" > "$target.tmp"
+mv "$target.tmp" "$target"
+  fi
+
+  sed -i \
+-e 's/![[:space:]]*ksu_late_loaded/1/g' \
+-e 's/\bksu_late_loaded\b/0/g' \
+"$target" || true
+
+  perl -0pi -e 's/if[ \t]*\([ \t]*security_dump_masked_av_fn[ \t]*\)/if (\&security_dump_masked_av_fn)/g' "$target" || true
+  perl -0pi -e 's/if[ \t]*\([ \t]*context_struct_compute_av_fn[ \t]*\)/if (\&context_struct_compute_av_fn)/g' "$target" || true
+
+  if grep -n 'ksu_late_loaded' "$target"; then
+echo "::error::ksu_late_loaded still remains in $target"
+exit 1
+  fi
+
+  if grep -nE 'if[[:space:]]*\([[:space:]]*(security_dump_masked_av_fn|context_struct_compute_av_fn)[[:space:]]*\)' "$target"; then
+echo "::error::Pointer-bool warning patterns still remain in $target"
+exit 1
+  fi
+
+  echo "✅ Fixed $target"
+}
+
 fix_sukisu_app_profile_c() {
   local target="$1"
   [ -f "$target" ] || return 0
@@ -1011,6 +1068,159 @@ fi
 # =============================================================================
 # OP13R / Android 14 / Linux 6.1 SELinux-hide compatibility
 # =============================================================================
+OP61_SELINUX_BACKUP_DIR="${RUNNER_TEMP:-/tmp}/op61-selinux-hide-${$}"
+
+backup_op61_selinux_hide() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  rm -rf "$OP61_SELINUX_BACKUP_DIR"; mkdir -p "$OP61_SELINUX_BACKUP_DIR"
+  local src="$KSU_FOLDER/kernel/feature/selinux_hide.c"
+  [ -f "$src" ] || { echo "::error::OP 6.1 SukiSU selinux_hide.c not found before SUSFS patch"; exit 1; }
+  cp -f "$src" "$OP61_SELINUX_BACKUP_DIR/selinux_hide.c"
+  echo "✅ OP 6.1: preserved pre-SUSFS SukiSU selinux_hide.c"
+}
+
+restore_op61_selinux_hide() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  local src="$OP61_SELINUX_BACKUP_DIR/selinux_hide.c"
+  local dst="$KSU_FOLDER/kernel/feature/selinux_hide.c"
+  [ -f "$src" ] || { echo "::error::OP 6.1 SELinux-hide backup is missing"; exit 1; }
+  cp -f "$src" "$dst"
+  if [ -f "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c" ]; then
+    cp -f "$src" "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"
+  fi
+
+  # SUSFS 6.1 patches security/selinux/selinuxfs.c to call these symbols from
+  # outside KernelSU. The original SukiSU implementation keeps the same state
+  # objects/functions static. After restoring the SukiSU implementation we must
+  # preserve SUSFS's required external linkage without replacing its runtime
+  # SELinux-hide logic.
+  for f in "$dst" "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"; do
+    [ -f "$f" ] || continue
+    sed -i \
+      -e 's/^static bool ksu_selinux_hide_enabled/ bool ksu_selinux_hide_enabled/' \
+      -e 's/^static struct page \*fake_status/struct page *fake_status/' \
+      -e 's/^static void initialize_fake_status/void initialize_fake_status/' \
+      -e 's/^static DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key)/DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key)/' \
+      "$f" || true
+    # Some revisions declare fake_status as a plain static struct/page after
+    # SUSFS rewrites. Normalize only the exact SUSFS-linked objects.
+    sed -i 's/^static[[:space:]]\+bool[[:space:]]\+ksu_selinux_hide_enabled/ bool ksu_selinux_hide_enabled/' "$f" || true
+    sed -i 's/^static[[:space:]]\+struct[[:space:]]\+page[[:space:]]\+\*fake_status/struct page *fake_status/' "$f" || true
+    sed -i 's/^static[[:space:]]\+void[[:space:]]\+initialize_fake_status/void initialize_fake_status/' "$f" || true
+    sed -i 's/^static[[:space:]]\+DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key)/DEFINE_STATIC_KEY_FALSE(fake_status_initialize_key)/' "$f" || true
+  done
+
+  for kbuild in "$KSU_FOLDER/kernel/Kbuild" "$COMMON_KERNEL_FOLDER/drivers/kernelsu/Kbuild"; do
+    [ -f "$kbuild" ] || continue
+    grep -q 'hook/lsm_hook\.o' "$kbuild" || echo 'kernelsu-objs += hook/lsm_hook.o' >> "$kbuild"
+  done
+  echo "✅ OP 6.1: restored SukiSU SELinux-hide implementation + lsm_hook.o"
+}
+
+ensure_op61_lsm_hook_state() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  local target="$1"; [ -f "$target" ] || return 0
+  python3 - "$target" <<'PY_OP61_STATE'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1])
+s = p.read_text()
+
+# SUSFS patching can leave lsm_hook.c with its hook routines intact while
+# dropping the private tracking state.  The routines below unconditionally
+# reference these objects, so put the state in one stable location before
+# any preprocessor conditionals.
+lock = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
+entry = 'static struct ksu_lsm_hook_entry ksu_lsm_hook_entries[16];'
+count = 'static int ksu_lsm_hook_count;'
+
+# Remove duplicate top-level definitions (including variants with spacing).
+s = re.sub(r'^\s*static\s+DEFINE_MUTEX\(ksu_lsm_hook_lock\);\s*\n?', '', s, flags=re.M)
+s = re.sub(r'^\s*static\s+struct\s+ksu_lsm_hook_entry\s+ksu_lsm_hook_entries\[16\];\s*\n?', '', s, flags=re.M)
+s = re.sub(r'^\s*static\s+int\s+ksu_lsm_hook_count\s*;\s*\n?', '', s, flags=re.M)
+
+# Insert after the entry struct definition if present; otherwise after includes.
+anchor = '};\n'
+pos = s.find(anchor)
+if pos >= 0:
+    pos += len(anchor)
+else:
+    m = list(re.finditer(r'^#include[^\n]*\n', s, re.M))
+    pos = m[-1].end() if m else 0
+state = '\n\n' + lock + '\n' + entry + '\n' + count + '\n'
+s = s[:pos] + state + s[pos:]
+p.write_text(s)
+print('OP 6.1: restored unconditional lsm_hook tracking state in', p)
+PY_OP61_STATE
+}
+
+fix_op61_lsm_hook_kcfi() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  local target="$1"; [ -f "$target" ] || return 0
+  python3 - "$target" <<'PY_OP61_LSM'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+if 'static bool ksu_lsm_hook_target_matches' not in s:
+    inc = """
+static bool ksu_lsm_hook_target_matches(void *current_origin, void *target)
+{
+    unsigned long start;
+    unsigned long size = 0;
+    unsigned long current_addr;
+    if (!current_origin || !target)
+        return false;
+    if (current_origin == target)
+        return true;
+    start = (unsigned long)target;
+    current_addr = (unsigned long)current_origin;
+    if (!kallsyms_lookup_size_offset(start, &size, NULL) || !size)
+        return false;
+    return current_addr >= start && current_addr < start + size;
+}
+"""
+    anchor = 'static DEFINE_MUTEX(ksu_lsm_hook_lock);'
+    if anchor not in s: raise SystemExit('OP61: lsm_hook lock anchor not found')
+    s = s.replace(anchor, inc + '\n' + anchor, 1)
+old='if (current_origin == target) {'
+count=s.count(old)
+if count == 0: raise SystemExit('OP61: no target comparison in lsm_hook.c')
+s=s.replace(old, 'if (ksu_lsm_hook_target_matches(current_origin, target)) {')
+p.write_text(s)
+print(f'OP 6.1: KCFI/LTO address-range matching applied to {p} ({count} comparisons)')
+PY_OP61_LSM
+}
+
+# =============================================================================
+# OP13R / Android 14 / Linux 6.1 SELinux-hide backup lifetime fix
+# =============================================================================
+force_op61_selinux_backup_lifetime() {
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then return 0; fi
+  local target="$1"
+  [ -f "$target" ] || return 0
+  python3 - "$target" <<'PY_OP61_BACKUP'
+from pathlib import Path
+import re, sys
+p = Path(sys.argv[1]); s = p.read_text()
+pat = re.compile(r'(static\s+void\s+ksu_selinux_hide_drop_backup_if_unused\s*\(\s*void\s*\)\s*\{)(.*?)(^\})', re.S|re.M)
+m = pat.search(s)
+if not m:
+    pat = re.compile(r'(void\s+ksu_selinux_hide_drop_backup_if_unused\s*\(\s*void\s*\)\s*\{)(.*?)(^\})', re.S|re.M)
+    m = pat.search(s)
+if not m:
+    print(f'OP61: ksu_selinux_hide_drop_backup_if_unused() not found in {p}; skipping backup-lifetime rewrite (newer SukiSU selinux_hide API)')
+    raise SystemExit(0)
+body = '''
+    /* OP61: retain backup_sepolicy until selinux_hide has consumed it. */
+    pr_info("KernelSU: OP61 selinux_hide: retaining backup_sepolicy\\n");
+'''
+s = s[:m.start(2)] + body + s[m.end(2):]
+p.write_text(s)
+print('OP61: forced selinux_hide backup lifetime in', p)
+PY_OP61_BACKUP
+}
+
 fix_sukisu_linker_symbols() {
   echo "Applying SukiSU linker-symbol compatibility cleanup..."
 
@@ -1023,6 +1233,9 @@ if [ -f "$kbuild" ]; then
   fi
   if [ -f "$(dirname "$kbuild")/hook/arm64/patch_memory.c" ] && ! grep -q 'hook/arm64/patch_memory\.o' "$kbuild"; then
     echo 'kernelsu-objs += hook/arm64/patch_memory.o' >> "$kbuild"
+  fi
+  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ] && [ -f "$(dirname "$kbuild")/hook/lsm_hook.c" ] && ! grep -q 'hook/lsm_hook\.o' "$kbuild"; then
+    echo 'kernelsu-objs += hook/lsm_hook.o' >> "$kbuild"
   fi
 fi
   done
@@ -1056,6 +1269,27 @@ fi
   done
 
   for target in \
+"$KSU_FOLDER/kernel/feature/selinux_hide.c" \
+"$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/selinux_hide.c"; do
+if [ -f "$target" ]; then
+  if [ "${ANDROID_VER_LOCAL:-}" != "android14" ] || [ "${KERNEL_VER_LOCAL:-}" != "6.1" ]; then
+    perl -0pi -e 's/\bret[ \t]*=[ \t]*ksu_patch_text[ \t]*\([^;]*\);/ret = 0;/g' "$target" || true
+    perl -0pi -e 's/^[ \t]*ksu_patch_text[ \t]*\([^;]*\);[ \t]*\n//mg' "$target" || true
+    sed -i '/^[[:space:]]*ksu_patch_text[[:space:]]*(.*);[[:space:]]*$/d' "$target" || true
+  else
+    echo "OP 6.1: preserving ksu_patch_text() in $target"
+  fi
+  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ]; then
+    echo "OP 6.1: preserving new_fn assignment used by ksu_patch_text()"
+  else
+    sed -i '/new_fn[[:space:]]*=[[:space:]]*my_sel_open_handle_status/d' "$target" || true
+  fi
+  sed -i '/^[[:space:]]*struct[[:space:]]\+selinux_policy[[:space:]]\+\*new_policy[[:space:]]*=/d' "$target" || true
+  sed -i '/^[[:space:]]*struct[[:space:]]\+selinux_state[[:space:]]\+\*new_state[[:space:]]*=/d' "$target" || true
+fi
+  done
+
+  for target in \
 "$KSU_FOLDER/kernel/feature/uts_spoof.c" \
 "$COMMON_KERNEL_FOLDER/drivers/kernelsu/feature/uts_spoof.c"; do
 [ -f "$target" ] && mv "$target" "$target.disabled" || true
@@ -1070,11 +1304,13 @@ fi
 
 cd "$KSU_FOLDER"
 
+backup_op61_selinux_hide
 
 patch -p1 --forward < "$SUSFS_FOLDER/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" || true
 
 EXPECTED_SUKISU_REJECTS=(
   "kernel/core/init.c.rej"
+  "kernel/feature/selinux_hide.c.rej"
   "kernel/runtime/boot_event.c.rej"
   "kernel/supercall/dispatch.c.rej"
   "kernel/policy/app_profile.c.rej"
@@ -1157,6 +1393,7 @@ if [ -f kernel/Kbuild.rej ]; then
   rm -f kernel/Kbuild.rej
 fi
 
+restore_op61_selinux_hide
 
 if [ -n "$(find . -name '*.rej' -print -quit)" ]; then
   echo "::error::Unexpected KernelSU-side .rej files remain:"
@@ -1177,12 +1414,14 @@ ensure_susfs_init_call          "kernel/core/init.c"
 ensure_sukisu_inline_hook_init  "kernel/core/init.c"
 fix_sukisu_boot_event_c         "kernel/runtime/boot_event.c"
 fix_sukisu_ksud_integration_c   "kernel/runtime/ksud_integration.c"
+fix_sukisu_selinux_hide_c       "kernel/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "kernel/policy/app_profile.c"
 fix_sukisu_dispatch_c           "kernel/supercall/dispatch.c"
 fix_sukisu_sucompat_api         "kernel"
 fix_sukisu_forced_execveat_link_symbols "kernel"
 fix_sukisu_syscall_event_bridge "kernel/hook/syscall_event_bridge.c"
 fix_sukisu_linker_symbols
+force_op61_selinux_backup_lifetime "kernel/feature/selinux_hide.c"
 
 # =============================================================================
 # Patch common/drivers/kernelsu mirror
@@ -1194,6 +1433,18 @@ echo "Applying SukiSU compatibility fixes..."
 
 sed -i '/DEFINE_MEMBER(netlink_kernel_cfg, cb_mutex)/d' drivers/kernelsu/kpm/super_access.c 2>/dev/null || true
 
+if [ -f drivers/kernelsu/hook/lsm_hook.c ]; then
+  sed -i \
+'s/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), "ksu");/security_add_hooks(ksu_hooks, ARRAY_SIZE(ksu_hooks), \&ksu_lsmid);/' \
+drivers/kernelsu/hook/lsm_hook.c || true
+
+  grep -q "static struct lsm_id ksu_lsmid" drivers/kernelsu/hook/lsm_hook.c || \
+sed -i '/security_add_hooks.*ksu_lsmid/i\    static struct lsm_id ksu_lsmid = { .name = "ksu", .id = LSM_ID_UNDEF };' \
+drivers/kernelsu/hook/lsm_hook.c || true
+fi
+
+ensure_op61_lsm_hook_state "drivers/kernelsu/hook/lsm_hook.c"
+fix_op61_lsm_hook_kcfi "drivers/kernelsu/hook/lsm_hook.c"
 
 sed -i 's/is_zygote_normal_app_uid(new_uid)/is_appuid(new_uid)/' drivers/kernelsu/hook/setuid_hook.c 2>/dev/null || true
 # Only stub out ksu_handle_extra_susfs_work() when susfs_extra_works is NOT provided by the
@@ -1222,12 +1473,14 @@ ensure_susfs_init_call          "drivers/kernelsu/core/init.c"
 ensure_sukisu_inline_hook_init  "drivers/kernelsu/core/init.c"
 fix_sukisu_boot_event_c         "drivers/kernelsu/runtime/boot_event.c"
 fix_sukisu_ksud_integration_c   "drivers/kernelsu/runtime/ksud_integration.c"
+fix_sukisu_selinux_hide_c       "drivers/kernelsu/feature/selinux_hide.c"
 fix_sukisu_app_profile_c        "drivers/kernelsu/policy/app_profile.c"
 fix_sukisu_dispatch_c           "drivers/kernelsu/supercall/dispatch.c"
 fix_sukisu_sucompat_api         "drivers/kernelsu"
 fix_sukisu_forced_execveat_link_symbols "drivers/kernelsu"
 fix_sukisu_syscall_event_bridge "drivers/kernelsu/hook/syscall_event_bridge.c"
 fix_sukisu_linker_symbols
+force_op61_selinux_backup_lifetime "drivers/kernelsu/feature/selinux_hide.c"
 
 mkdir -p drivers/kernelsu/kpm/uapi include/uapi
 
@@ -1579,6 +1832,39 @@ fi
   done
 fi
 
+if [ -f drivers/kernelsu/feature/selinux_hide.c ]; then
+  if grep -nE 'ksu_late_loaded' drivers/kernelsu/feature/selinux_hide.c; then
+    echo "::error::ksu_late_loaded still exists in drivers/kernelsu/feature/selinux_hide.c"; exit 1
+  fi
+  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ]; then
+    grep -q 'ksu_patch_text[[:space:]]*(' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 selinux_hide.c is missing ksu_patch_text()"; exit 1; }
+    grep -q 'ksu_lsm_hook[[:space:]]*(' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 selinux_hide.c is missing ksu_lsm_hook()"; exit 1; }
+    grep -q 'context_write' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 context_write hook missing"; exit 1; }
+    grep -q 'access_write' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 access_write hook missing"; exit 1; }
+    grep -q 'hook/lsm_hook\.o' drivers/kernelsu/Kbuild || { echo "::error::OP 6.1 lsm_hook.o missing from Kbuild"; exit 1; }
+    grep -qE '^[[:space:]]*(bool|static_key)[[:space:]]+ksu_selinux_hide_enabled|^bool ksu_selinux_hide_enabled' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 ksu_selinux_hide_enabled is not externally defined"; exit 1; }
+    grep -qE '^struct page \*fake_status' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 fake_status is not externally defined"; exit 1; }
+    grep -qE '^void initialize_fake_status[[:space:]]*\(' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 initialize_fake_status() is not externally defined"; exit 1; }
+    grep -qE '^DEFINE_STATIC_KEY_FALSE\(fake_status_initialize_key\)' drivers/kernelsu/feature/selinux_hide.c || { echo "::error::OP 6.1 fake_status_initialize_key is not externally defined"; exit 1; }
+    echo "✅ OP 6.1 SELinux-hide runtime hooks, SUSFS status symbols and lsm_hook.o verified"
+  fi
+
+  if [ "${ANDROID_VER_LOCAL:-}" = "android14" ] && [ "${KERNEL_VER_LOCAL:-}" = "6.1" ]; then
+    grep -qE 'new_fn[[:space:]]*=[[:space:]]*my_sel_open_handle_status' drivers/kernelsu/feature/selinux_hide.c || {
+      echo "::error::OP 6.1 selinux_hide.c is missing new_fn assignment required by ksu_patch_text()"
+      exit 1
+    }
+  elif grep -nE 'new_fn[[:space:]]*=[[:space:]]*my_sel_open_handle_status' drivers/kernelsu/feature/selinux_hide.c; then
+    echo "::error::Unused new_fn still exists in drivers/kernelsu/feature/selinux_hide.c"
+    exit 1
+  fi
+
+  if grep -nE 'if[[:space:]]*\([[:space:]]*(security_dump_masked_av_fn|context_struct_compute_av_fn)[[:space:]]*\)' drivers/kernelsu/feature/selinux_hide.c; then
+echo "::error::Pointer-bool warning patterns still remain in drivers/kernelsu/feature/selinux_hide.c"
+exit 1
+  fi
+fi
+
 if [ -f drivers/kernelsu/policy/app_profile.c ]; then
   if grep -n "Already root, don't escape" drivers/kernelsu/policy/app_profile.c; then
 echo "::error::Already-root early abort still exists in drivers/kernelsu/policy/app_profile.c"
@@ -1836,10 +2122,10 @@ EOF
 
 sed -i '/^CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=/d' \
   "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig" || true
-
-if [ "${HIDE_KSU_SUSFS_SYMBOLS:-false}" = "true" ]; then
+if [ "${OP_HIDE_KSU_SUSFS_SYMBOLS:-false}" = "true" ]; then
   echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" \
     >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
+  echo "SUSFS: HIDE_KSU_SUSFS_SYMBOLS enabled (OP_HIDE_KSU_SUSFS_SYMBOLS=true)"
 else
   echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=n" \
     >> "$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
