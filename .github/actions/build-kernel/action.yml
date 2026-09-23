@@ -26,6 +26,11 @@ inputs:
     required: false
     type: string
     default: ''
+  hide_ksu_susfs_symbols:
+    description: 'Hide KSU/SUSFS kernel symbols'
+    required: false
+    type: boolean
+    default: false
   optimize_level:
     description: 'Compiler optimization level (O2 or O3)'
     required: false
@@ -43,11 +48,6 @@ inputs:
     default: false
   enable_adios:
     description: 'Enable ADIOS I/O scheduler support (5.10/5.15/6.1/6.6/6.12 kernels)'
-    required: false
-    type: boolean
-    default: false
-  hide_ksu_susfs_symbols:
-    description: 'Enable hiding of KernelSU/SUSFS symbols from kallsyms'
     required: false
     type: boolean
     default: false
@@ -1071,7 +1071,7 @@ runs:
       env:
         ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
-        HIDE_KSU_SUSFS_SYMBOLS: ${{ inputs.hide_ksu_susfs_symbols }}
+        OP_HIDE_KSU_SUSFS_SYMBOLS: ${{ inputs.hide_ksu_susfs_symbols }}
       run: |
         set -euo pipefail
         echo "::group::Apply SUSFS patches"
@@ -1085,21 +1085,6 @@ runs:
         bash "$SCRIPT"
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
-        echo "::endgroup::"
-
-    - name: Apply SukiSU SELinux-hide fix (independent of SUSFS)
-      shell: bash
-      if: ${{ always() && !cancelled() }}
-      env:
-        ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
-        KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
-      run: |
-        set -euo pipefail
-        echo "::group::Apply SukiSU SELinux-hide fix"
-        SCRIPT="$GITHUB_WORKSPACE/configs/apply_sukisu_selinux_hide_fix.sh"
-        [ -f "$SCRIPT" ] || { echo "::error::SukiSU SELinux-hide fix script not found: $SCRIPT"; exit 1; }
-        chmod +x "$SCRIPT"
-        bash "$SCRIPT"
         echo "::endgroup::"
 
     - name: Sanitize SukiSU v2.3.0 compatibility files
@@ -1810,20 +1795,6 @@ runs:
         fi
 
         echo "✅ ADIOS I/O scheduler setup completed"
-        echo "::endgroup::"
-
-    - name: Integrate NoMount built-in support
-      shell: bash
-      if: ${{ always() }}
-      env:
-        NOMOUNT_VERSION: v2.0.0
-      run: |
-        set -euo pipefail
-        echo "::group::Integrate NoMount built-in support"
-        SCRIPT="$GITHUB_WORKSPACE/configs/apply_nomount.sh"
-        [ -f "$SCRIPT" ] || { echo "::error::NoMount integration script not found: $SCRIPT"; exit 1; }
-        chmod +x "$SCRIPT"
-        bash "$SCRIPT"
         echo "::endgroup::"
 
     - name: Build Kernel
