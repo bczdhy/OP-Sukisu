@@ -26,11 +26,6 @@ inputs:
     required: false
     type: string
     default: ''
-  hide_ksu_susfs_symbols:
-    description: 'Hide KSU/SUSFS kernel symbols'
-    required: false
-    type: boolean
-    default: false
   optimize_level:
     description: 'Compiler optimization level (O2 or O3)'
     required: false
@@ -1071,7 +1066,6 @@ runs:
       env:
         ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
-        OP_HIDE_KSU_SUSFS_SYMBOLS: ${{ inputs.hide_ksu_susfs_symbols }}
       run: |
         set -euo pipefail
         echo "::group::Apply SUSFS patches"
@@ -1085,6 +1079,21 @@ runs:
         bash "$SCRIPT"
 
         echo "SUSFS_PATCH_APPLIED=true" >> "$GITHUB_ENV"
+        echo "::endgroup::"
+
+    - name: Apply SukiSU SELinux-hide fix for Android 14 / 6.1 (independent of SUSFS)
+      shell: bash
+      if: ${{ env.ANDROID_VER == 'android14' && env.KERNEL_VER == '6.1' }}
+      env:
+        ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
+        KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
+      run: |
+        set -euo pipefail
+        echo "::group::Apply SukiSU SELinux-hide fix"
+        SCRIPT="$GITHUB_WORKSPACE/configs/apply_sukisu_selinux_hide_fix.sh"
+        [ -f "$SCRIPT" ] || { echo "::error::SukiSU SELinux-hide fix script not found: $SCRIPT"; exit 1; }
+        chmod +x "$SCRIPT"
+        bash "$SCRIPT"
         echo "::endgroup::"
 
     - name: Sanitize SukiSU v2.3.0 compatibility files
@@ -1795,6 +1804,20 @@ runs:
         fi
 
         echo "✅ ADIOS I/O scheduler setup completed"
+        echo "::endgroup::"
+
+    - name: Integrate NoMount built-in support
+      shell: bash
+      if: ${{ env.ANDROID_VER == 'android14' }}
+      env:
+        NOMOUNT_VERSION: v2.0.0
+      run: |
+        set -euo pipefail
+        echo "::group::Integrate NoMount built-in support"
+        SCRIPT="$GITHUB_WORKSPACE/configs/apply_nomount.sh"
+        [ -f "$SCRIPT" ] || { echo "::error::NoMount integration script not found: $SCRIPT"; exit 1; }
+        chmod +x "$SCRIPT"
+        bash "$SCRIPT"
         echo "::endgroup::"
 
     - name: Build Kernel
