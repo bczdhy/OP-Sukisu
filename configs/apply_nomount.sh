@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# NoMount built-in integration for all supported kernels in this workflow.
+# NoMount built-in integration for the OP13R Android 14 / Linux 6.1 kernel.
 # Uses the upstream NoMount kernel setup script and pins the known v2.0.0 release
 # so the kernel build is reproducible.
 
@@ -10,17 +10,14 @@ NOMOUNT_VERSION="${NOMOUNT_VERSION:-v2.0.0}"
 SETUP_URL="https://raw.githubusercontent.com/maxsteeel/nomount/${NOMOUNT_VERSION}/kernel/setup.sh"
 SETUP_SCRIPT="${RUNNER_TEMP:-/tmp}/nomount-setup-${NOMOUNT_VERSION//\//_}.sh"
 DEFCONFIG="$COMMON_KERNEL_FOLDER/arch/arm64/configs/gki_defconfig"
-if [[ ! -f "$DEFCONFIG" ]]; then
-  DEFCONFIG=$(find "$COMMON_KERNEL_FOLDER/arch/arm64/configs" -maxdepth 1 -type f -name '*defconfig' | sort | head -n 1 || true)
-fi
 
 if [[ ! -d "$COMMON_KERNEL_FOLDER/fs" ]]; then
   echo "::error::NoMount: kernel fs/ directory not found: $COMMON_KERNEL_FOLDER/fs"
   exit 1
 fi
 
-if [[ -z "$DEFCONFIG" || ! -f "$DEFCONFIG" ]]; then
-  echo "::error::NoMount: no arm64 defconfig found"
+if [[ ! -f "$DEFCONFIG" ]]; then
+  echo "::error::NoMount: defconfig not found: $DEFCONFIG"
   exit 1
 fi
 
