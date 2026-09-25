@@ -10,8 +10,8 @@ permissions:
   actions: write
 
 env:
-  CCACHE_DIR: /home/runner/.cache/ccache
-  LDCACHE_DIR: /home/runner/.cache/ld
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  LDCACHE_DIR: ${{ github.workspace }}/.ld_cache
 
 jobs:
   build-6-1-118:
