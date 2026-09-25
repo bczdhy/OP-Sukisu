@@ -1,0 +1,69 @@
+name: ChatGPT OP13R Kernel Test
+
+on:
+  push:
+    branches:
+      - chatgpt-kernel-fix-test
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  build-6-1-118:
+    name: OP13R 6.1.118
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Load config
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "json=$(jq -c . configs/a16/OP13r-6.1.118.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build kernel
+        uses: ./.github/actions/build-kernel
+        with:
+          op_config_json: ${{ steps.config.outputs.json }}
+          ksu_type: SUKISU
+          ksu_branch_or_hash: builtin
+          susfs_commit_hash_or_branch: gki-android14-6.1
+          optimize_level: O2
+          clean: true
+          debug: true
+          enable_adios: false
+          feature_overrides_json: '{}'
+          hide_ksu_susfs_symbols: false
+          github_token: ${{ github.token }}
+
+  build-6-1-141:
+    name: OP13R 6.1.141
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Load config
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "json=$(jq -c . configs/a16/OP13r.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Build kernel
+        uses: ./.github/actions/build-kernel
+        with:
+          op_config_json: ${{ steps.config.outputs.json }}
+          ksu_type: SUKISU
+          ksu_branch_or_hash: builtin
+          susfs_commit_hash_or_branch: gki-android14-6.1
+          optimize_level: O2
+          clean: true
+          debug: true
+          enable_adios: false
+          feature_overrides_json: '{}'
+          hide_ksu_susfs_symbols: false
+          github_token: ${{ github.token }}
