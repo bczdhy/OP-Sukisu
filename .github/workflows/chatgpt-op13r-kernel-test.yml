@@ -9,6 +9,10 @@ permissions:
   contents: read
   actions: write
 
+env:
+  CCACHE_DIR: /home/runner/.cache/ccache
+  LDCACHE_DIR: /home/runner/.cache/ld
+
 jobs:
   build-6-1-118:
     name: OP13R 6.1.118
@@ -23,6 +27,7 @@ jobs:
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=3 update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ccache
+          mkdir -p "$CCACHE_DIR" "$LDCACHE_DIR"
 
       - name: Load config
         id: config
@@ -59,6 +64,7 @@ jobs:
           set -euo pipefail
           sudo apt-get -o Acquire::Retries=3 update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ccache
+          mkdir -p "$CCACHE_DIR" "$LDCACHE_DIR"
 
       - name: Load config
         id: config
