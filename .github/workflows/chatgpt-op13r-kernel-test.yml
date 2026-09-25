@@ -1,9 +1,9 @@
 name: ChatGPT OP13R Kernel Test
 
 on:
-  push:
+  pull_request:
     branches:
-      - chatgpt-kernel-fix-test
+      - SukiSU
 
 permissions:
   contents: read
