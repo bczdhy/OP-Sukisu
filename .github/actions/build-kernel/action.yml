@@ -52,7 +52,7 @@ inputs:
     type: boolean
     default: false
   feature_overrides_json:
-    description: 'Optional JSON overrides for BBR, BBRv3, BBG and Droidspaces. Values: enable/disable/config.'
+    description: 'Optional JSON overrides for KPM, BBR, BBRv3, BBG and Droidspaces. KPM values: enable/disable.'
     required: false
     type: string
     default: '{}'
@@ -138,14 +138,22 @@ runs:
           echo "::error::feature_overrides_json must be a JSON object"
           exit 1
         fi
-        for feature in bbr bbr3 bbg ds; do
+        for feature in kpm bbr bbr3 bbg ds; do
           value=$(jq -r --arg f "$feature" '.[$f] // "Auto Detect"' <<< "$overrides")
-          case "$value" in
-            Auto\ Detect|config) ;;
-            Enable|enable) echo "OP_${feature^^}=true" >> "$GITHUB_ENV" ;;
-            Disable|disable) echo "OP_${feature^^}=false" >> "$GITHUB_ENV" ;;
-            *) echo "::error::Invalid override for '$feature': '$value'. Expected Auto Detect, Enable, or Disable."; exit 1 ;;
-          esac
+          if [ "$feature" = "kpm" ]; then
+            case "$value" in
+              Enable|enable) echo "OP_KPM=true" >> "$GITHUB_ENV" ;;
+              Disable|disable) echo "OP_KPM=false" >> "$GITHUB_ENV" ;;
+              *) echo "::error::Invalid override for 'kpm': '$value'. Expected Enable or Disable."; exit 1 ;;
+            esac
+          else
+            case "$value" in
+              Auto\ Detect|config) ;;
+              Enable|enable) echo "OP_${feature^^}=true" >> "$GITHUB_ENV" ;;
+              Disable|disable) echo "OP_${feature^^}=false" >> "$GITHUB_ENV" ;;
+              *) echo "::error::Invalid override for '$feature': '$value'. Expected Auto Detect, Enable, or Disable."; exit 1 ;;
+            esac
+          fi
         done
         echo "Feature overrides: $(jq -c . <<< "$overrides")"
         echo "::endgroup::"
@@ -178,6 +186,7 @@ runs:
         susfs="$OP_SUSFS"
         opt="$OP_OPT"
         bbg="$OP_BBG"
+        kpm="$OP_KPM"
         bbr="$OP_BBR"
         bbr3="$OP_BBR3"
         ttl="$OP_TTL"
@@ -273,6 +282,12 @@ runs:
           errors+=("Input 'bbg' cannot be empty")
         elif [[ "$bbg" != "true" && "$bbg" != "false" ]]; then
           errors+=("Input 'bbg' contains invalid characters. Allowed: 'true' or 'false'. Got: '$bbg'")
+        fi
+        
+        if [[ -z "$kpm" ]]; then
+          errors+=("Input 'kpm' cannot be empty")
+        elif [[ "$kpm" != "true" && "$kpm" != "false" ]]; then
+          errors+=("Input 'kpm' contains invalid characters. Allowed: 'true' or 'false'. Got: '$kpm'")
         fi
         
         if [[ -z "$bbr" ]]; then
@@ -1051,7 +1066,13 @@ runs:
 
         {
           printf '%s\n' 'CONFIG_KSU=y'
-          printf '%s\n' 'CONFIG_KPM=n'
+          if [ "$OP_KPM" = "true" ]; then
+            printf '%s\n' 'CONFIG_KPM=y'
+            echo "KPM: enabled"
+          else
+            printf '%s\n' 'CONFIG_KPM=n'
+            echo "KPM: disabled"
+          fi
           printf '%s\n' 'CONFIG_KSU_MULTI_MANAGER_SUPPORT=y'
           # (CONFIG_KSU_FULL_NAME_FORMAT dropped — SukiSU-Ultra ignores it; the version
           #  string is branded via KSU_VERSION_FULL in the Kbuild above.)
@@ -1089,7 +1110,7 @@ runs:
 
     - name: Apply SukiSU SELinux Hide Implementation (OP13R)
       shell: bash
-      if: ${{ env.ANDROID_VER == 'android14' && env.KERNEL_VER == '6.1' && inputs.ksu_type == 'SUKISU' }}
+      if: ${{ inputs.ksu_type == 'SUKISU' }}
       env:
         ANDROID_VER_LOCAL: ${{ env.ANDROID_VER }}
         KERNEL_VER_LOCAL: ${{ env.KERNEL_VER }}
